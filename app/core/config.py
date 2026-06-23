@@ -9,18 +9,18 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     # 앱 기본 정보
-    appName: str = "HCR Backend"
+    app_name: str = "HCR Backend"
     debug: bool = False
 
     # CORS 허용 출처 (프론트 개발 서버)
-    frontendOrigin: str = "http://localhost:3000"
+    frontend_origin: str = "http://localhost:3000"
 
     # DB 연동 단계에서 채울 예정
-    # mariadbUrl: str = ""
-    # mongodbUri: str = ""
+    # mariadb_url: str = ""
+    # mongodb_uri: str = ""
 
     # LLM 연동 단계에서 채울 예정
-    # openaiApiKey: str = ""
+    # openai_api_key: str = ""
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
