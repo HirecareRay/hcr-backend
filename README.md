@@ -35,6 +35,31 @@ uvicorn app.main:app --reload            # http://localhost:8000
 
 ---
 
+## DB 연결 (로컬 개발)
+
+MariaDB·MongoDB는 EC2에 Docker로 떠 있다(`mariadb:11.8` 3306, `mongo:8.2` 27017).
+**EC2 보안그룹이 DB 포트를 외부에서 막고 있으므로, 로컬에서는 SSH 터널을 경유해 붙는다.**
+(DB 포트를 인터넷에 직접 여는 것보다 안전 — 권장 방식)
+
+```bash
+# 1) 터널 켜기 — 개발하는 동안 별도 터미널에서 계속 띄워둔다
+ssh -N -L 3306:localhost:3306 -L 27017:localhost:27017 <EC2별칭>
+
+# 2) 서버 실행 (다른 터미널)
+conda activate py312 && uvicorn app.main:app --reload
+
+# 3) 연결 확인
+curl localhost:8000/health/db   # → {"status":"ok","mariadb":true,"mongodb":true}
+```
+
+- `<EC2별칭>`은 각자 `~/.ssh/config`에 등록한다. **EC2 SSH 접속 권한이 필요** — 안 되면 DB 담당자에게 본인 SSH 공개키 등록을 요청한다.
+- 터널을 경유하므로 `.env`의 DB 호스트는 공인 IP가 아니라 **`127.0.0.1`** 을 가리킨다.
+- MongoDB가 계정 인증을 쓰면 URI에 **`?authSource=admin`** 을 붙인다.
+- 터널을 안 켜고 서버를 띄우면 `timed out`. `/health/db`가 `degraded`면 터널부터 확인한다.
+- **DB 계정·비밀번호는 깃에 올리지 않는다** — `.env.example`이 아니라 각자 `.env`에만 채우고, 값은 안전한 채널(비밀번호 관리자 등)로 공유받는다.
+
+---
+
 ## 우리 위치 (전체 그림)
 
 ```
