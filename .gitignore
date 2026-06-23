@@ -1,0 +1,19 @@
+# 파이썬
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# 가상환경
+.venv/
+venv/
+env/
+
+# 환경변수 (실제 값은 절대 커밋 금지)
+.env
+.env.local
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
