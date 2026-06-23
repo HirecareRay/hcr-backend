@@ -3,10 +3,10 @@ fastapi
 uvicorn[standard]
 pydantic-settings
 
-# DB 연동 단계에서 추가 예정
-# sqlalchemy
-# pymysql        # MariaDB
-# pymongo        # MongoDB
+# DB 연동
+sqlalchemy
+pymysql        # MariaDB 드라이버
+pymongo        # MongoDB
 
 # LLM 연동 단계에서 추가 예정
 # langchain

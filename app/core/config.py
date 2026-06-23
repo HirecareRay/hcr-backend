@@ -15,9 +15,10 @@ class Settings(BaseSettings):
     # CORS 허용 출처 (프론트 개발 서버)
     frontend_origin: str = "http://localhost:3000"
 
-    # DB 연동 단계에서 채울 예정
-    # mariadb_url: str = ""
-    # mongodb_uri: str = ""
+    # DB 연동 (값이 비어 있으면 해당 DB는 비활성 — 앱은 그대로 기동된다)
+    mariadb_url: str = ""        # 예: mysql+pymysql://user:pw@host:3306/hcr
+    mongodb_uri: str = ""        # 예: mongodb://host:27017
+    mongodb_db_name: str = "hcr"  # 사용할 MongoDB 데이터베이스명
 
     # LLM 연동 단계에서 채울 예정
     # openai_api_key: str = ""

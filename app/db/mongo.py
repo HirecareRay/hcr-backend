@@ -1,15 +1,28 @@
 """MongoDB 연결 (pymongo) — 문서 / RAG(원문·벡터).
 
-DB 연동 단계에서 활성화한다:
-  1. requirements.txt 의 pymongo 주석을 푼다
-  2. app/core/config.py 에 mongodb_uri 필드를 추가한다
-  3. .env 에 MONGODB_URI 를 채운다
-  4. 아래 주석을 푼다
+MONGODB_URI 가 비어 있으면 client 는 None 으로 두고 앱은 그대로 기동된다
+(DB 접근 시점에 명확한 에러를 던진다). MongoClient 는 지연 연결이라
+객체 생성만으로는 네트워크에 접속하지 않는다 — 첫 작업 때 연결된다.
 """
 
-# from pymongo import MongoClient
-#
-# from app.core.config import settings
-#
-# mongo_client = MongoClient(settings.mongodb_uri)
-# mongo_db = mongo_client["hcr"]
+from pymongo import MongoClient
+from pymongo.database import Database
+
+from app.core.config import settings
+
+mongo_client: MongoClient | None = (
+    MongoClient(
+        settings.mongodb_uri,
+        serverSelectionTimeoutMS=5000,  # 서버 못 찾으면 5초 후 에러 (무한 대기 방지)
+    )
+    if settings.mongodb_uri
+    else None
+)
+
+
+def get_mongo_db() -> Database:
+    """RAG·문서 컬렉션이 담긴 MongoDB 데이터베이스 핸들을 반환한다."""
+    if mongo_client is None:
+        raise RuntimeError("MONGODB_URI가 설정되지 않았습니다 (.env 확인)")
+
+    return mongo_client[settings.mongodb_db_name]
