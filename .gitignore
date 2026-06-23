@@ -1,19 +1,58 @@
-# 파이썬
+# ───── 파이썬 ─────
 __pycache__/
 *.py[cod]
+*$py.class
 *.egg-info/
-.pytest_cache/
+*.egg
+build/
+dist/
+*.manifest
+*.spec
 
-# 가상환경
+# ───── 가상환경 ─────
 .venv/
 venv/
 env/
+ENV/
+.conda/
+# conda 환경은 보통 전역(py312)이라 레포에 안 두지만, 로컬 폴더 생성 시 대비
+.python-version
 
-# 환경변수 (실제 값은 절대 커밋 금지)
+# ───── 환경변수 (실제 값은 절대 커밋 금지) ─────
 .env
-.env.local
+.env.*
+!.env.example
 
-# IDE / OS
+# ───── 테스트 / 커버리지 ─────
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+.tox/
+.cache/
+
+# ───── 타입체크 / 린트 캐시 ─────
+.mypy_cache/
+.ruff_cache/
+.dmypy.json
+
+# ───── 로그 / 임시 ─────
+*.log
+logs/
+*.tmp
+tmp/
+
+# ───── 노트북 ─────
+.ipynb_checkpoints/
+
+# ───── IDE / OS ─────
 .vscode/
 .idea/
+*.swp
 .DS_Store
+Thumbs.db
+
+# ───── 개인용 Claude 지침 (팀 공유 안 함) ─────
+CLAUDE.md
+.claude/
