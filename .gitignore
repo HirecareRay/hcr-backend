@@ -49,6 +49,7 @@ tmp/
 # ───── IDE / OS ─────
 .vscode/
 .idea/
+.history/
 *.swp
 .DS_Store
 Thumbs.db

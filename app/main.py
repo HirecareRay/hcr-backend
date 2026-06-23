@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.company.router import router as company_router
 from app.core.config import settings
+from app.db.health import check_mariadb, check_mongodb
 from app.interview.router import router as interview_router
 from app.search.router import router as search_router
 
@@ -33,6 +34,22 @@ app.include_router(search_router)
 def health_check():
     """서버 상태 확인용. 배포 후 살아있는지 점검할 때 쓴다."""
     return {"status": "ok", "app": settings.app_name}
+
+
+@app.get("/health/db")
+def db_health_check():
+    """DB 연결 상태 확인 — MariaDB·MongoDB에 핑을 보낸다.
+
+    둘 다 붙으면 status "ok", 하나라도 끊기면 "degraded" 로 알려준다.
+    (드라이버·연결 정보가 맞는지 팀에서 빠르게 확인하는 용도)
+    """
+    mariadb_ok = check_mariadb()
+    mongodb_ok = check_mongodb()
+    return {
+        "status": "ok" if mariadb_ok and mongodb_ok else "degraded",
+        "mariadb": mariadb_ok,
+        "mongodb": mongodb_ok,
+    }
 
 
 @app.get("/")
