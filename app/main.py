@@ -4,19 +4,42 @@
 DB 연결은 lifespan 에서 만들어 app.state 에 보관하고 종료 시 자동 정리한다.
 """
 
+import logging
 from collections.abc import AsyncIterator
 from contextlib import ExitStack, asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import Engine
+from sqlalchemy.exc import SQLAlchemyError
 
+# Base.metadata 에 테이블을 등록하려면 모델 모듈이 import 돼 있어야 한다.
+# (auth_router import 로도 끌려오지만, 명시적으로 의존성을 드러낸다)
+from app.auth import models as _auth_models  # noqa: F401
+from app.auth.router import router as auth_router
 from app.company.router import router as company_router
 from app.core.config import settings
 from app.db.health import check_mariadb, check_mongodb
 from app.db.mongo import build_mongo_client
-from app.db.session import build_engine, build_session_factory
+from app.db.session import Base, build_engine, build_session_factory
 from app.interview.router import router as interview_router
 from app.search.router import router as search_router
+
+logger = logging.getLogger(__name__)
+
+
+def _ensure_tables(engine: Engine) -> None:
+    """등록된 ORM 테이블을 보장한다(있으면 무시).
+
+    초기 단계라 Alembic 대신 부팅 시 생성한다. DB 가 닿지 않는 환경
+    (로컬 터널 꺼짐·CI)에서도 서버는 떠야 하므로, 실패해도 경고만 남기고
+    부팅을 막지 않는다.
+    TODO: 스키마가 안정되면 Alembic 마이그레이션으로 교체
+    """
+    try:
+        Base.metadata.create_all(bind=engine)
+    except SQLAlchemyError as exc:
+        logger.warning("테이블 생성 생략 — DB 연결 실패: %s", exc)
 
 
 @asynccontextmanager
@@ -31,6 +54,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         engine = build_engine()
         if engine is not None:
             stack.callback(engine.dispose)  # 종료 시 MariaDB 풀 정리
+            _ensure_tables(engine)
         app.state.db_engine = engine
         app.state.session_factory = build_session_factory(engine)
 
@@ -55,6 +79,7 @@ app.add_middleware(
 )
 
 # 도메인별 라우터 등록
+app.include_router(auth_router)
 app.include_router(company_router)
 app.include_router(interview_router)
 app.include_router(search_router)
