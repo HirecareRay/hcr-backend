@@ -20,6 +20,11 @@ class Settings(BaseSettings):
     mongodb_uri: str = ""        # 예: mongodb://host:27017
     mongodb_db_name: str = "hcr"  # 사용할 MongoDB 데이터베이스명
 
+    # 인증(JWT) — 시크릿은 .env 에서만 채운다(코드·example 에 박지 않음)
+    jwt_secret: str = ""               # 토큰 서명 키 (반드시 .env 에 설정)
+    jwt_algorithm: str = "HS256"       # 서명 알고리즘
+    jwt_expire_minutes: int = 60 * 24  # 액세스 토큰 만료(분) — 기본 1일
+
     # LLM 연동 단계에서 채울 예정
     # openai_api_key: str = ""
 
