@@ -44,5 +44,8 @@ def get_db() -> Iterator[Session]:
     db = SessionLocal()
     try:
         yield db
+    except Exception:
+        db.rollback()  # 요청 처리 중 에러나면 하다 만 트랜잭션 되돌림
+        raise
     finally:
-        db.close()
+        db.close()  # 성공·실패 무관하게 커넥션을 풀에 반납 (다음 요청이 재사용)
