@@ -1,32 +1,46 @@
 """FastAPI 진입점.
 
-지금은 서버가 살아있는지 확인하는 /health 만 있다. 이후 단계에서
-DB 연결, 도메인별 라우터(기업 분석·면접 등), LLM 연동을 여기에 붙인다.
+서버 상태 확인용 /health 와 DB 점검용 /health/db, 도메인별 라우터를 등록한다.
+DB 연결은 lifespan 에서 만들어 app.state 에 보관하고 종료 시 자동 정리한다.
 """
 
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import ExitStack, asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.company.router import router as company_router
 from app.core.config import settings
 from app.db.health import check_mariadb, check_mongodb
-from app.db.mongo import mongo_client
-from app.db.session import engine
+from app.db.mongo import build_mongo_client
+from app.db.session import build_engine, build_session_factory
 from app.interview.router import router as interview_router
 from app.search.router import router as search_router
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """앱 수명 주기. 종료 시 DB 커넥션 풀을 정리한다."""
-    yield
-    if mongo_client is not None:
-        mongo_client.close()  # MongoDB 커넥션 풀 정리
-    if engine is not None:
-        engine.dispose()  # MariaDB 커넥션 풀 정리
+    """앱 수명 주기.
+
+    시작 시 DB 연결을 만들어 app.state 에 보관하고, 종료 시 ExitStack 이
+    등록된 정리를 자동 실행한다(커넥션 풀 닫기). with/ExitStack 으로 묶어
+    close 를 손으로 부르지 않아도 누수 없이 정리된다.
+    """
+    with ExitStack() as stack:
+        engine = build_engine()
+        if engine is not None:
+            stack.callback(engine.dispose)  # 종료 시 MariaDB 풀 정리
+        app.state.db_engine = engine
+        app.state.session_factory = build_session_factory(engine)
+
+        mongo_client = build_mongo_client()
+        if mongo_client is not None:
+            stack.enter_context(mongo_client)  # with 처럼 종료 시 close 자동
+        app.state.mongo_client = mongo_client
+
+        yield
+    # ExitStack 블록을 벗어나며 mongo close · engine.dispose 가 자동 실행됨
 
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
@@ -53,14 +67,14 @@ def health_check():
 
 
 @app.get("/health/db")
-def db_health_check():
+def db_health_check(request: Request):
     """DB 연결 상태 확인 — MariaDB·MongoDB에 핑을 보낸다.
 
     둘 다 붙으면 status "ok", 하나라도 끊기면 "degraded" 로 알려준다.
     (드라이버·연결 정보가 맞는지 팀에서 빠르게 확인하는 용도)
     """
-    mariadb_ok = check_mariadb()
-    mongodb_ok = check_mongodb()
+    mariadb_ok = check_mariadb(getattr(request.app.state, "db_engine", None))
+    mongodb_ok = check_mongodb(getattr(request.app.state, "mongo_client", None))
     return {
         "status": "ok" if mariadb_ok and mongodb_ok else "degraded",
         "mariadb": mariadb_ok,
