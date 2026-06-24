@@ -1,4 +1,4 @@
-"""MongoDB 연결 (pymongo) — 문서 / RAG(원문·벡터).
+"""MongoDB 연결 (pymongo) — 문서 저장용. (RAG 벡터·원문은 MariaDB 담당)
 
 MONGODB_URI 가 비어 있으면 client 는 None 으로 두고 앱은 그대로 기동된다
 (DB 접근 시점에 명확한 에러를 던진다). MongoClient 는 지연 연결이라
@@ -21,7 +21,7 @@ mongo_client: MongoClient | None = (
 
 
 def get_mongo_db() -> Database:
-    """RAG·문서 컬렉션이 담긴 MongoDB 데이터베이스 핸들을 반환한다."""
+    """문서 컬렉션이 담긴 MongoDB 데이터베이스 핸들을 반환한다."""
     if mongo_client is None:
         raise RuntimeError("MONGODB_URI가 설정되지 않았습니다 (.env 확인)")
 
