@@ -70,8 +70,8 @@ curl localhost:8000/health/db   # → {"status":"ok","mariadb":true,"mongodb":tr
 [Next.js BFF  app/api/**]   ← 지금은 더미데이터가 여기 있음
    ▼
 [이 레포: FastAPI AI 백엔드]  ★ 우리가 만드는 곳
-   ├─ MariaDB  (정형: 기업·채용·재무)
-   ├─ MongoDB  (문서 / RAG 벡터·원문)
+   ├─ MariaDB  (정형: 기업·채용·재무 + RAG 벡터·원문)
+   ├─ MongoDB  (문서)
    └─ OpenAI API (GPT-4o mini), Whisper (STT)
 ```
 
@@ -98,8 +98,8 @@ app/
 ├── shared/
 │   └── schema.py        # CamelModel — 응답 snake_case→camelCase 변환 베이스
 ├── db/
-│   ├── session.py       # MariaDB(SQLAlchemy) 세션 — 연동 단계에 활성화
-│   └── mongo.py         # MongoDB(pymongo) 클라이언트 — 연동 단계에 활성화
+│   ├── session.py       # MariaDB(SQLAlchemy) 세션 — 정형 + RAG 벡터·원문, 연동 단계에 활성화
+│   └── mongo.py         # MongoDB(pymongo) 클라이언트 — 문서, 연동 단계에 활성화
 │
 ├── company/             # ★ 기준 레퍼런스 — 다른 도메인은 이걸 복사해 채움
 │   ├── router.py        #   HTTP 입출력·검증만 (비즈니스 로직 금지)
