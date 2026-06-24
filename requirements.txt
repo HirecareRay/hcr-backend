@@ -8,6 +8,11 @@ sqlalchemy
 pymysql        # MariaDB 드라이버
 pymongo        # MongoDB
 
+# 인증 (회원가입·로그인)
+bcrypt            # 비밀번호 해시·검증
+pyjwt             # JWT 발급·검증
+email-validator   # Pydantic EmailStr 검증
+
 # LLM 연동 단계에서 추가 예정
 # langchain
 # langchain-openai
