@@ -4,16 +4,32 @@
 DB 연결, 도메인별 라우터(기업 분석·면접 등), LLM 연동을 여기에 붙인다.
 """
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.company.router import router as company_router
 from app.core.config import settings
 from app.db.health import check_mariadb, check_mongodb
+from app.db.mongo import mongo_client
+from app.db.session import engine
 from app.interview.router import router as interview_router
 from app.search.router import router as search_router
 
-app = FastAPI(title=settings.app_name)
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """앱 수명 주기. 종료 시 DB 커넥션 풀을 정리한다."""
+    yield
+    if mongo_client is not None:
+        mongo_client.close()  # MongoDB 커넥션 풀 정리
+    if engine is not None:
+        engine.dispose()  # MariaDB 커넥션 풀 정리
+
+
+app = FastAPI(title=settings.app_name, lifespan=lifespan)
 
 # 프론트(Next.js)에서 호출할 수 있도록 CORS 허용
 app.add_middleware(
