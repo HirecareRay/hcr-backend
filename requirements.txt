@@ -13,7 +13,9 @@ bcrypt            # 비밀번호 해시·검증
 pyjwt             # JWT 발급·검증
 email-validator   # Pydantic EmailStr 검증
 
-# LLM 연동 단계에서 추가 예정
+# STT(실시간 전사) — OpenAI Whisper/gpt-4o-mini-transcribe
+openai
+
+# LLM 연동 단계(Phase 3)에서 추가 예정
 # langchain
 # langchain-openai
-# openai
