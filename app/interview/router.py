@@ -22,14 +22,25 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from app.core.config import settings
-from app.interview import service
-from app.interview.schemas import ControlAction, ControlMessage, UpstreamMessage
+from app.interview import nonverbal, service
+from app.interview.schemas import (
+    ControlAction,
+    ControlMessage,
+    EventSnapshotMessage,
+    LandmarkFrameMessage,
+    UpstreamMessage,
+)
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix='/interviews', tags=['interview'])
 
 _upstream_adapter: TypeAdapter[UpstreamMessage] = TypeAdapter(UpstreamMessage)
+
+# 비언어 누적 상한 — 집계는 통계라 최근 N개면 충분하다. 긴 세션에서 무한 누적·
+# tuple 복사 비용(특히 event_snapshot 의 base64 image)을 막는 방어선이다.
+_MAX_LANDMARKS = 1200  # ~20분 @ 1s
+_MAX_EVENTS = 500
 
 
 @dataclass(frozen=True)
@@ -49,6 +60,10 @@ class _WsSession:
     current_question: str = ''
     audio_chunks: list[bytes] = field(default_factory=list)
     history: tuple[service.Turn, ...] = ()
+    # 비언어 신호는 audio_chunks 와 달리 저빈도(landmark ~1s, event 발생 시)라
+    # 가변 list 대신 불변 tuple + replace 로 누적해 불변 패턴을 지킨다.
+    landmarks: tuple[LandmarkFrameMessage, ...] = ()
+    events: tuple[EventSnapshotMessage, ...] = ()
 
 
 async def _send(websocket: WebSocket, event: BaseModel) -> None:
@@ -101,7 +116,14 @@ async def _handle_message(
     websocket: WebSocket, message: UpstreamMessage, session: _WsSession
 ) -> _WsSession:
     """업스트림 메시지를 처리하고 갱신된 세션 상태를 반환한다."""
-    # landmark_frame·event_snapshot 은 비언어 지표 — Phase 4 에서 평가에 반영
+    # 비언어 신호는 다운스트림 응답 없이 세션에 누적만 한다 — 요약 시 집계에 쓰인다.
+    # 상한을 넘으면 가장 오래된 것부터 버려 메모리·복사 비용을 묶어둔다.
+    if isinstance(message, LandmarkFrameMessage):
+        landmarks = (session.landmarks + (message,))[-_MAX_LANDMARKS:]
+        return replace(session, landmarks=landmarks)
+    if isinstance(message, EventSnapshotMessage):
+        events = (session.events + (message,))[-_MAX_EVENTS:]
+        return replace(session, events=events)
     if not isinstance(message, ControlMessage):
         return session
 
@@ -188,5 +210,6 @@ async def _next_main_or_summary(
             awaiting_followup=False,
             current_question=text,
         )
-    await _send(websocket, await service.build_summary(session.history))
+    metrics = nonverbal.aggregate(session.landmarks, session.events)
+    await _send(websocket, await service.build_summary(session.history, metrics))
     return session

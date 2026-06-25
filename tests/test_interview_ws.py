@@ -191,7 +191,8 @@ def test_ws_summary_after_main_questions_exhausted(monkeypatch):
     assert summary['improvements'] == ['결론 강화']
 
 
-def test_ws_landmark_frame_ignored_then_feedback_still_flows(monkeypatch):
+def test_ws_landmark_frame_has_no_downstream_response(monkeypatch):
+    """비언어 프레임은 누적만 — 즉시 다운스트림 응답이 없어 루프를 깨지 않는다."""
     _patch_llm(monkeypatch, eval_deltas=['ok'])
 
     with client.websocket_connect('/interviews/ws/s1') as ws:
@@ -201,4 +202,35 @@ def test_ws_landmark_frame_ignored_then_feedback_still_flows(monkeypatch):
         ws.send_json({'type': 'control', 'action': 'answer_end'})
         first = ws.receive_json()
 
-    assert first['type'] == 'transcript_delta'  # landmark 가 루프를 깨지 않음
+    assert first['type'] == 'transcript_delta'  # landmark 다음 바로 전사 — 끼어든 응답 없음
+
+
+def test_ws_accumulated_landmarks_reflected_in_summary(monkeypatch):
+    """답변 중 보낸 시선이탈 landmark 가 최종 요약의 비언어 피드백·점수에 반영된다."""
+    _patch_llm(
+        monkeypatch,
+        main_questions=['자기소개 부탁드립니다'],
+        eval_deltas=['ok'],  # transcript + eval 1개 → _drain(2)
+        summary={'overall_score': 90, 'language_feedback': '논리적', 'improvements': []},
+    )
+
+    with client.websocket_connect('/interviews/ws/s1') as ws:
+        assert ws.receive_json()['questionId'] == 'm0'
+        ws.send_json({'type': 'control', 'action': 'answer_start'})
+        for _ in range(5):
+            ws.send_json({'type': 'landmark_frame', 'gaze_x': 0.95})  # 시선 이탈
+        ws.send_json({'type': 'event_snapshot', 'event': 'gaze_away', 'image': 'data:,'})
+        ws.send_bytes(b'audio')
+        ws.send_json({'type': 'control', 'action': 'answer_end'})
+        _drain(ws, 2)  # transcript + eval
+        ws.send_json({'type': 'control', 'action': 'next'})  # 꼬리질문
+        assert ws.receive_json()['questionId'] == 'f0'
+        ws.send_bytes(b'a2')
+        ws.send_json({'type': 'control', 'action': 'answer_end'})
+        _drain(ws, 2)
+        ws.send_json({'type': 'control', 'action': 'next'})  # 메인 소진 → 요약
+        summary = ws.receive_json()
+
+    assert summary['type'] == 'summary'
+    assert '시선' in summary['nonverbalFeedback']  # 누적 landmark 반영
+    assert summary['overallScore'] < 90.0  # 비언어 감점 반영
