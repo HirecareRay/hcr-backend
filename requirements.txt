@@ -5,7 +5,7 @@ pydantic-settings
 
 # DB 연동
 sqlalchemy
-pymysql        # MariaDB 드라이버
+mariadb        # MariaDB 공식 드라이버
 pymongo        # MongoDB
 
 # 인증 (회원가입·로그인)
@@ -16,6 +16,13 @@ email-validator   # Pydantic EmailStr 검증
 # STT(실시간 전사) — OpenAI Whisper/gpt-4o-mini-transcribe
 openai
 
-# LLM 연동 단계(Phase 3)에서 추가 예정
-# langchain
-# langchain-openai
+# 머신러닝 및 임베딩 모델
+torch
+sentence-transformers
+
+# PDF 및 문서 처리
+pymupdf           # fitz 라이브러리 사용을 위한 패키지 명칭
+
+# LLM 연동 단계(Phase 3)
+langchain-core
+langchain-openai
