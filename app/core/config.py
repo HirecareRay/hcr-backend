@@ -26,9 +26,8 @@ class Settings(BaseSettings):
     jwt_expire_minutes: int = 60 * 24  # 액세스 토큰 만료(분) — 기본 1일
 
     # LLM 연동 단계에서 채울 예정
-    # openai_api_key: str = ""
+    openai_api_key: str = ""
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
-
 
 settings = Settings()
