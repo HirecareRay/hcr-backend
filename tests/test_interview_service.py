@@ -7,7 +7,7 @@ asyncio.run 으로 실행해 pytest-asyncio 의존성을 피한다.
 
 import asyncio
 from collections.abc import AsyncIterator
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 from app.interview import context, llm, nonverbal, service, stt
 from app.interview.schemas import EventSnapshotMessage, LandmarkFrameMessage
@@ -187,6 +187,24 @@ def test_build_summary_clamps_score_to_zero(monkeypatch):
     metrics = nonverbal.aggregate(frames, events)
     summary = asyncio.run(service.build_summary((), metrics))
     assert summary.overall_score == 0.0
+
+
+def test_build_summary_survives_nonverbal_error(monkeypatch):
+    """비언어 환산이 예외를 던져도 요약은 0 가감·안내 문구로 계속 생성된다."""
+    monkeypatch.setattr(
+        llm,
+        'generate_summary',
+        AsyncMock(
+            return_value={'overall_score': 70, 'language_feedback': 'ok', 'improvements': []}
+        ),
+    )
+    monkeypatch.setattr(nonverbal, 'score_penalty', Mock(side_effect=RuntimeError('boom')))
+
+    summary = asyncio.run(service.build_summary((), nonverbal.NonverbalMetrics()))
+
+    assert summary.type == 'summary'
+    assert summary.overall_score == 70.0  # 감점 0 으로 우회(요약 안 끊김)
+    assert '오류' in summary.nonverbal_feedback
 
 
 def test_build_summary_falls_back_on_error(monkeypatch):

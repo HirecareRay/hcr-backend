@@ -127,16 +127,30 @@ def _summary_event(data: dict, metrics: NonverbalMetrics) -> SummaryEvent:
     nonverbal_feedback 은 집계를 사람이 읽는 문장으로 채운다(누락 필드는 기본값).
     """
     base_score = _coerce_score(data.get('overall_score'))
+    penalty, nonverbal_feedback = _safe_nonverbal(metrics)
     return SummaryEvent(
-        overall_score=_clamp_score(base_score + nonverbal.score_penalty(metrics)),
+        overall_score=_clamp_score(base_score + penalty),
         language_feedback=str(
             data.get('language_feedback') or '평가를 생성하지 못했습니다.'
         ),
-        nonverbal_feedback=nonverbal.describe(metrics),
+        nonverbal_feedback=nonverbal_feedback,
         improvements=[
             str(item) for item in (data.get('improvements') or []) if str(item).strip()
         ],
     )
+
+
+def _safe_nonverbal(metrics: NonverbalMetrics) -> tuple[float, str]:
+    """비언어 지표를 (감점, 피드백 문장)으로 안전 환산한다.
+
+    nonverbal 모듈은 예외를 던지지 않도록 설계됐지만, 만일의 버그로 환산이 실패해도
+    최종 요약이 끊기지 않도록 방어한다(예외 시 0 가감·안내 문구로 우회 — 데모 보호).
+    """
+    try:
+        return nonverbal.score_penalty(metrics), nonverbal.describe(metrics)
+    except Exception as error:  # noqa: BLE001 - 비언어 실패가 요약을 막지 않게
+        logger.error('비언어 환산 실패, 요약은 계속 진행: %s', error)
+        return 0.0, '비언어 분석 중 오류가 발생해 태도 분석을 생략했습니다.'
 
 
 def _clamp_score(value: float) -> float:

@@ -13,11 +13,11 @@ lifespan 을 띄우지 않는 TestClient 를 그대로 쓴다.
 """
 
 from collections.abc import AsyncIterator
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 from fastapi.testclient import TestClient
 
-from app.interview import llm, stt
+from app.interview import llm, nonverbal, stt
 from app.main import app
 
 client = TestClient(app)
@@ -234,3 +234,30 @@ def test_ws_accumulated_landmarks_reflected_in_summary(monkeypatch):
     assert summary['type'] == 'summary'
     assert '시선' in summary['nonverbalFeedback']  # 누적 landmark 반영
     assert summary['overallScore'] < 90.0  # 비언어 감점 반영
+
+
+def test_ws_summary_sent_even_if_nonverbal_aggregate_raises(monkeypatch):
+    """비언어 집계가 예외를 던져도 최종 요약은 끊기지 않고 전송된다(데모 보호)."""
+    _patch_llm(
+        monkeypatch,
+        main_questions=['자기소개 부탁드립니다'],
+        eval_deltas=['ok'],
+        summary={'overall_score': 80, 'language_feedback': '논리적', 'improvements': []},
+    )
+    monkeypatch.setattr(nonverbal, 'aggregate', Mock(side_effect=RuntimeError('boom')))
+
+    with client.websocket_connect('/interviews/ws/s1') as ws:
+        assert ws.receive_json()['questionId'] == 'm0'
+        ws.send_bytes(b'a1')
+        ws.send_json({'type': 'control', 'action': 'answer_end'})
+        _drain(ws, 2)  # transcript + eval
+        ws.send_json({'type': 'control', 'action': 'next'})  # 꼬리질문
+        assert ws.receive_json()['questionId'] == 'f0'
+        ws.send_bytes(b'a2')
+        ws.send_json({'type': 'control', 'action': 'answer_end'})
+        _drain(ws, 2)
+        ws.send_json({'type': 'control', 'action': 'next'})  # 메인 소진 → 요약
+        summary = ws.receive_json()
+
+    assert summary['type'] == 'summary'
+    assert summary['overallScore'] == 80.0  # 집계 실패 → 감점 0 으로 우회
