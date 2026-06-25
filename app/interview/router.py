@@ -210,6 +210,10 @@ async def _next_main_or_summary(
             awaiting_followup=False,
             current_question=text,
         )
-    metrics = nonverbal.aggregate(session.landmarks, session.events)
+    try:
+        metrics = nonverbal.aggregate(session.landmarks, session.events)
+    except Exception as error:  # noqa: BLE001 - 집계 실패가 요약을 막지 않게
+        logger.error('비언어 집계 실패, 빈 지표로 요약 진행: %s', error)
+        metrics = nonverbal.NonverbalMetrics()
     await _send(websocket, await service.build_summary(session.history, metrics))
     return session
