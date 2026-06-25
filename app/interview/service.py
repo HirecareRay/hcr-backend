@@ -1,10 +1,11 @@
-"""모의 면접 실시간 WS 비즈니스 로직 (Phase 1 — walking skeleton).
+"""모의 면접 실시간 WS 비즈니스 로직.
 
-지금은 더미 데이터만 생성한다. Phase 2(STT)·3(LLM)·5(통합 리포트)에서 실제
-전사·평가·집계로 교체한다. 라우터는 WS I/O 만 담당하고, 다운스트림 이벤트 생성은
-여기로 위임한다(레이어 원칙: 라우터에 비즈니스 로직 금지).
+질문 풀·요약은 아직 더미다(Phase 3 LLM·Phase 5 통합 리포트에서 교체). 전사는
+Phase 2 에서 실제 STT 로 교체됐다 — answer_end 시 누적 오디오를 stt 모듈로 전사한다.
+라우터는 WS I/O 만 담당하고, 다운스트림 이벤트 생성은 여기로 위임한다(레이어 원칙).
 """
 
+from app.interview import stt
 from app.interview.schemas import (
     EvalDeltaEvent,
     QuestionEvent,
@@ -14,8 +15,8 @@ from app.interview.schemas import (
 
 # 더미 질문 풀 (질문ID, 질문문) — Phase 3에서 LLM 생성으로 교체
 _DUMMY_QUESTIONS: tuple[tuple[str, str], ...] = (
-    ("q1", "간단히 자기소개 부탁드립니다."),
-    ("q2", "최근에 가장 도전적이었던 경험은 무엇이었나요?"),
+    ('q1', '간단히 자기소개 부탁드립니다.'),
+    ('q2', '최근에 가장 도전적이었던 경험은 무엇이었나요?'),
 )
 
 
@@ -30,27 +31,28 @@ def question_at(index: int) -> QuestionEvent:
     return QuestionEvent(question_id=question_id, text=text, tts_text=text)
 
 
-def answer_feedback() -> list[TranscriptDeltaEvent | EvalDeltaEvent]:
-    """답변 종료 시 더미 전사·평가 스트림.
+async def transcribe_answer(audio: bytes) -> TranscriptDeltaEvent | None:
+    """누적 답변 오디오를 전사해 최종 자막 이벤트로 감싼다.
 
-    Phase 2(STT)·3(LLM)에서 실제 토큰 스트림으로 교체한다.
+    전사 결과가 비면(무음·인식 실패) None 을 반환해 빈 자막을 내려보내지 않는다.
+    Phase 2.5 에서 실시간 부분결과(is_final=False) 스트리밍으로 확장한다.
     """
-    return [
-        TranscriptDeltaEvent(delta="(더미 전사 결과입니다)", is_final=True),
-        EvalDeltaEvent(delta="(더미 평가: 답변 구조가 명확합니다)"),
-    ]
+    text = await stt.transcribe_audio(audio)
+    if not text:
+        return None
+    return TranscriptDeltaEvent(delta=text, is_final=True)
 
 
-def audio_ack(byte_count: int) -> TranscriptDeltaEvent:
-    """오디오 청크 수신 확인용 더미 자막. Phase 2에서 실제 STT 부분 결과로 교체."""
-    return TranscriptDeltaEvent(delta=f"(오디오 {byte_count}바이트 수신)", is_final=False)
+def eval_feedback() -> list[EvalDeltaEvent]:
+    """답변 종료 시 더미 평가 스트림 — Phase 3(LLM)에서 실제 토큰 스트림으로 교체."""
+    return [EvalDeltaEvent(delta='(더미 평가: 답변 구조가 명확합니다)')]
 
 
 def final_summary() -> SummaryEvent:
     """면접 종료 시 더미 통합 리포트. Phase 5에서 실제 집계로 교체."""
     return SummaryEvent(
         overall_score=80.0,
-        language_feedback="(더미) 답변이 논리적으로 전개되었습니다.",
-        nonverbal_feedback="(더미) 시선 처리가 안정적입니다.",
-        improvements=["(더미) 결론을 더 명확히 마무리하기"],
+        language_feedback='(더미) 답변이 논리적으로 전개되었습니다.',
+        nonverbal_feedback='(더미) 시선 처리가 안정적입니다.',
+        improvements=['(더미) 결론을 더 명확히 마무리하기'],
     )
