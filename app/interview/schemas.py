@@ -36,20 +36,20 @@ class SessionStatus(str, Enum):
     흐름: 대기 → 질문 → 답변중 → 평가 → (다음질문 | 종료) → 요약.
     """
 
-    IDLE = "idle"
-    QUESTION = "question"
-    ANSWERING = "answering"
-    EVALUATING = "evaluating"
-    FINISHED = "finished"
-    SUMMARY = "summary"
+    IDLE = 'idle'
+    QUESTION = 'question'
+    ANSWERING = 'answering'
+    EVALUATING = 'evaluating'
+    FINISHED = 'finished'
+    SUMMARY = 'summary'
 
 
 class ControlAction(str, Enum):
     """control 업스트림 메시지의 전이 액션."""
 
-    ANSWER_START = "answer_start"
-    ANSWER_END = "answer_end"
-    NEXT = "next"
+    ANSWER_START = 'answer_start'
+    ANSWER_END = 'answer_end'
+    NEXT = 'next'
 
 
 # ── 업스트림 (브라우저 → FastAPI, raw snake_case / CamelModel 금지) ──
@@ -58,7 +58,7 @@ class ControlAction(str, Enum):
 class ControlMessage(BaseModel):
     """세션 전이 신호 (답변 시작·종료·다음 질문)."""
 
-    type: Literal["control"] = "control"
+    type: Literal['control'] = 'control'
     action: ControlAction
 
 
@@ -69,7 +69,7 @@ class LandmarkFrameMessage(BaseModel):
     discriminated union 골격은 안정적이므로 필드 추가는 비-breaking.
     """
 
-    type: Literal["landmark_frame"] = "landmark_frame"
+    type: Literal['landmark_frame'] = 'landmark_frame'
     gaze_x: float | None = None
     gaze_y: float | None = None
     head_yaw: float | None = None
@@ -84,7 +84,7 @@ class EventSnapshotMessage(BaseModel):
     image 는 base64 data URL 또는 업로드 URL. meta 는 이벤트별 부가 정보.
     """
 
-    type: Literal["event_snapshot"] = "event_snapshot"
+    type: Literal['event_snapshot'] = 'event_snapshot'
     event: str
     image: str
     meta: dict[str, Any] = Field(default_factory=dict)
@@ -92,7 +92,7 @@ class EventSnapshotMessage(BaseModel):
 
 UpstreamMessage = Annotated[
     Union[ControlMessage, LandmarkFrameMessage, EventSnapshotMessage],
-    Field(discriminator="type"),
+    Field(discriminator='type'),
 ]
 """업스트림 JSON 메시지 union. audio_chunk(binary)는 제외 — 파일 상단 주석 참고."""
 
@@ -103,7 +103,7 @@ UpstreamMessage = Annotated[
 class QuestionEvent(CamelModel):
     """생성된 면접 질문 (+TTS용 텍스트)."""
 
-    type: Literal["question"] = "question"
+    type: Literal['question'] = 'question'
     question_id: str
     text: str
     tts_text: str | None = None
@@ -112,7 +112,7 @@ class QuestionEvent(CamelModel):
 class TranscriptDeltaEvent(CamelModel):
     """실시간 자막 토큰 (STT 부분 결과)."""
 
-    type: Literal["transcript_delta"] = "transcript_delta"
+    type: Literal['transcript_delta'] = 'transcript_delta'
     delta: str
     is_final: bool = False
 
@@ -120,7 +120,7 @@ class TranscriptDeltaEvent(CamelModel):
 class EvalDeltaEvent(CamelModel):
     """답변 평가 토큰 스트림 (LLM 생성 중간 토큰)."""
 
-    type: Literal["eval_delta"] = "eval_delta"
+    type: Literal['eval_delta'] = 'eval_delta'
     delta: str
 
 
@@ -130,7 +130,7 @@ class SummaryEvent(CamelModel):
     상세 필드는 Phase 5(통합 리포트)에서 확장 — 아래는 최소 합의셋.
     """
 
-    type: Literal["summary"] = "summary"
+    type: Literal['summary'] = 'summary'
     overall_score: float
     language_feedback: str
     nonverbal_feedback: str
@@ -139,6 +139,6 @@ class SummaryEvent(CamelModel):
 
 DownstreamEvent = Annotated[
     Union[QuestionEvent, TranscriptDeltaEvent, EvalDeltaEvent, SummaryEvent],
-    Field(discriminator="type"),
+    Field(discriminator='type'),
 ]
 """다운스트림 이벤트 union. CamelModel 직렬화(by_alias=True)로 프론트에 내려간다."""
