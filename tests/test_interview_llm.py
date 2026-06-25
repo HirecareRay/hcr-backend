@@ -58,6 +58,18 @@ def test_main_questions_splits_lines_and_limits_count(monkeypatch):
     assert create.await_args.kwargs['model'] == 'gpt-4o-mini'  # 저가 모델 고정
 
 
+def test_main_questions_dedupes_preserving_order(monkeypatch):
+    """중복 질문은 입력 순서를 유지하며 한 번만 남긴다."""
+    create = AsyncMock(
+        return_value=_completion('자기소개 부탁드립니다\n지원 동기는?\n자기소개 부탁드립니다')
+    )
+    monkeypatch.setattr(llm, '_get_client', lambda: _fake_chat_client(create))
+
+    questions = asyncio.run(llm.generate_main_questions('회사 컨텍스트', 4))
+
+    assert questions == ['자기소개 부탁드립니다', '지원 동기는?']
+
+
 def test_main_questions_api_error_raises_friendly(monkeypatch):
     """외부 API 장애는 내부 스택 노출 없이 RuntimeError 로 변환."""
     create = AsyncMock(side_effect=Exception('upstream 500'))

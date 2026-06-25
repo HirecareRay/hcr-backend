@@ -42,6 +42,20 @@ def test_build_main_questions_falls_back_on_empty(monkeypatch):
     assert questions == list(context.FALLBACK_MAIN_QUESTIONS)
 
 
+def test_build_main_questions_pads_short_result_with_fallback(monkeypatch):
+    """LLM 이 count 보다 적게 주면 기본 질문으로 빈 자리를 채운다(중복 제외)."""
+    monkeypatch.setattr(
+        llm, 'generate_main_questions', AsyncMock(return_value=['회사 맞춤 질문?'])
+    )
+    questions = asyncio.run(service.build_main_questions(3))
+
+    assert len(questions) == 3
+    assert questions[0] == '회사 맞춤 질문?'  # LLM 질문이 앞에 온다
+    # 나머지는 기본 질문에서 보충되며 중복은 없다
+    assert len(set(questions)) == 3
+    assert all(q in (('회사 맞춤 질문?',) + context.FALLBACK_MAIN_QUESTIONS) for q in questions)
+
+
 # ── stream_evaluation ─────────────────────────────────────────────
 
 
