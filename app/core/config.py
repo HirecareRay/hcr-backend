@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"       # 서명 알고리즘
     jwt_expire_minutes: int = 60 * 24  # 액세스 토큰 만료(분) — 기본 1일
 
-    # LLM 연동 단계에서 채울 예정
+    # LLM·STT 연동 — 시크릿은 .env 에서만 채운다(코드·example 에 박지 않음)
     openai_api_key: str = ""
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
