@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     # LLM·STT 연동 — 시크릿은 .env 에서만 채운다(코드·example 에 박지 않음)
     openai_api_key: str = ""
 
+    # 면접 — 한 세션에서 LLM 이 생성할 메인 질문 수(꼬리질문은 별도). 비용·길이 상한.
+    interview_main_question_count: int = 4
+
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
 
