@@ -36,14 +36,29 @@ class Turn:
 
 
 async def build_main_questions(count: int) -> list[str]:
-    """회사 컨텍스트로 메인 질문을 생성한다(LLM 실패 시 안전 기본 질문으로 우회)."""
+    """회사 컨텍스트로 메인 질문을 생성한다(LLM 실패·개수 부족 시 기본 질문으로 보충)."""
     company_context = await context.get_company_context()
     try:
         questions = await llm.generate_main_questions(company_context, count)
     except RuntimeError as error:
         logger.error('메인 질문 생성 실패, 기본 질문 사용: %s', error)
         questions = []
-    return questions or list(context.FALLBACK_MAIN_QUESTIONS)
+    return _ensure_question_count(questions, count)
+
+
+def _ensure_question_count(questions: list[str], count: int) -> list[str]:
+    """LLM 질문이 count 에 못 미치면 기본 질문으로 보충한다(중복 제외, 순서 유지).
+
+    LLM 이 빈 결과·부족분을 반환해도 면접이 항상 count 개 질문으로 진행되도록
+    안전 기본 질문(FALLBACK_MAIN_QUESTIONS)을 빈 자리에 채워 넣는다(데모 보호).
+    """
+    filled = list(dict.fromkeys(q for q in questions if q.strip()))
+    for fallback in context.FALLBACK_MAIN_QUESTIONS:
+        if len(filled) >= count:
+            break
+        if fallback not in filled:
+            filled.append(fallback)
+    return filled[:count]
 
 
 def question_event(question_id: str, text: str) -> QuestionEvent:

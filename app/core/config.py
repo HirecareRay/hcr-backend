@@ -4,6 +4,7 @@
 않고, .env.example만 공유한다. 새 환경변수가 생기면 여기에 필드를 추가한다.
 """
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -29,7 +30,8 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
 
     # 면접 — 한 세션에서 LLM 이 생성할 메인 질문 수(꼬리질문은 별도). 비용·길이 상한.
-    interview_main_question_count: int = 4
+    # 0·음수면 첫 질문 송신이 깨지고, 과도하면 토큰 비용이 급증하므로 1~10 으로 제한한다.
+    interview_main_question_count: int = Field(4, ge=1, le=10)
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
