@@ -3,6 +3,12 @@
 서버 상태 확인용 /health 와 DB 점검용 /health/db, 도메인별 라우터를 등록한다.
 DB 연결은 lifespan 에서 만들어 app.state 에 보관하고 종료 시 자동 정리한다.
 """
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# 기존의 임포트 코드들...
+from app.auth import models as _auth_models
 
 import logging
 from collections.abc import AsyncIterator
@@ -22,6 +28,7 @@ from app.core.config import settings
 from app.db.health import check_mariadb, check_mongodb
 from app.db.mongo import build_mongo_client
 from app.db.session import Base, build_engine, build_session_factory
+from app.documents.router import router as documents_router
 from app.interview.router import router as interview_router
 from app.search.router import router as search_router
 
@@ -81,6 +88,7 @@ app.add_middleware(
 # 도메인별 라우터 등록
 app.include_router(auth_router)
 app.include_router(company_router)
+app.include_router(documents_router)
 app.include_router(interview_router)
 app.include_router(search_router)
 
@@ -105,7 +113,6 @@ def db_health_check(request: Request):
         "mariadb": mariadb_ok,
         "mongodb": mongodb_ok,
     }
-
 
 @app.get("/")
 def root():
