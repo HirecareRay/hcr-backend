@@ -31,6 +31,11 @@ class Settings(BaseSettings):
     # 면접 — 한 세션에서 LLM 이 생성할 메인 질문 수(꼬리질문은 별도). 비용·길이 상한.
     interview_main_question_count: int = 4
 
+    # 면접 자막 — True 면 오디오 청크마다 더미 부분 자막을 흘려 실시간 자막 UX 를
+    # OpenAI 호출·키 없이 시연한다(Phase 1 워킹 스켈레톤). False(기본)면 answer_end
+    # 에 누적 오디오를 whisper-1 로 한 번에 전사하는 실 STT 경로를 쓴다.
+    interview_dummy_transcript: bool = False
+
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
 

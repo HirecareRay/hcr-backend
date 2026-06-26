@@ -59,6 +59,9 @@ class _WsSession:
     awaiting_followup: bool = False
     current_question: str = ''
     audio_chunks: list[bytes] = field(default_factory=list)
+    # 더미 자막 모드에서 현재 답변에 흘린 부분 자막(=오디오 청크) 개수.
+    # answer_start·answer_end 마다 0 으로 리셋해 답변별로 토큰 순번을 새로 센다.
+    transcript_sent: int = 0
     history: tuple[service.Turn, ...] = ()
     # 비언어 신호는 audio_chunks 와 달리 저빈도(landmark ~1s, event 발생 시)라
     # 가변 list 대신 불변 tuple + replace 로 누적해 불변 패턴을 지킨다.
@@ -92,10 +95,22 @@ async def interview_ws(websocket: WebSocket, session_id: str) -> None:
             if raw['type'] == 'websocket.disconnect':
                 break
 
-            # 바이너리(audio_chunk)는 JSON 스키마가 없는 답변 오디오 — 누적만 한다
+            # 바이너리(audio_chunk)는 JSON 스키마가 없는 답변 오디오.
+            #  - 더미 모드: 오디오는 쓰지 않으므로 버퍼링하지 않고, 청크마다 부분
+            #    자막만 흘려 자막이 흐르게 한다(OpenAI 호출 0, 불필요한 메모리 적재 0).
+            #  - 실 모드: answer_end 에 통전사하기 위해 누적만 한다.
             audio = raw.get('bytes')
             if audio is not None:
-                session.audio_chunks.append(audio)
+                if settings.interview_dummy_transcript:
+                    await _send(
+                        websocket,
+                        service.dummy_transcript_partial(session.transcript_sent),
+                    )
+                    session = replace(
+                        session, transcript_sent=session.transcript_sent + 1
+                    )
+                else:
+                    session.audio_chunks.append(audio)
                 continue
 
             text = raw.get('text')
@@ -128,8 +143,8 @@ async def _handle_message(
         return session
 
     if message.action is ControlAction.ANSWER_START:
-        # 새 답변 시작 — 이전 답변의 누적 오디오를 비운다
-        return replace(session, audio_chunks=[])
+        # 새 답변 시작 — 이전 답변의 누적 오디오·자막 토큰 순번을 비운다
+        return replace(session, audio_chunks=[], transcript_sent=0)
 
     if message.action is ControlAction.ANSWER_END:
         return await _finish_answer(websocket, session)
@@ -141,12 +156,14 @@ async def _handle_message(
 
 
 async def _finish_answer(websocket: WebSocket, session: _WsSession) -> _WsSession:
-    """누적 오디오를 전사해 자막을 보내고 평가를 스트리밍한 뒤 턴을 기록한다.
+    """답변을 확정해 자막을 닫고 평가를 스트리밍한 뒤 턴을 기록한다.
 
-    빈 버퍼면 전사를 건너뛰고(불필요한 과금 방지), STT 장애 시 WS 를 끊지 않고
-    로깅 후 평가만 진행한다. 평가 토큰은 누적해 현재 턴의 평가로 저장한다.
+    답변 텍스트는 모드에 따라 다르게 얻는다 — 더미 모드면 흘린 토큰을 합치고,
+    실 모드면 누적 오디오를 전사한다. 빈 답변이면 평가를 건너뛰고(불필요한 과금
+    방지), STT 장애 시 WS 를 끊지 않고 로깅 후 평가만 진행한다. 평가 토큰은 누적해
+    현재 턴의 평가로 저장한다.
     """
-    answer = await _transcribe(websocket, session)
+    answer = await _resolve_answer(websocket, session)
 
     evaluation = ''
     async for event in service.stream_evaluation(session.current_question, answer):
@@ -154,7 +171,33 @@ async def _finish_answer(websocket: WebSocket, session: _WsSession) -> _WsSessio
         await _send(websocket, event)
 
     turn = service.Turn(session.current_question, answer, evaluation)
-    return replace(session, audio_chunks=[], history=session.history + (turn,))
+    return replace(
+        session,
+        audio_chunks=[],
+        transcript_sent=0,
+        history=session.history + (turn,),
+    )
+
+
+async def _resolve_answer(websocket: WebSocket, session: _WsSession) -> str:
+    """모드에 맞게 답변 텍스트를 얻으며 자막을 마무리한다(빈 답변은 '').
+
+    더미 모드는 종료 마커(isFinal=True)를, 실 모드는 통전사 자막(isFinal=True)을 보낸다.
+    """
+    if settings.interview_dummy_transcript:
+        return await _finalize_dummy(websocket, session)
+    return await _transcribe(websocket, session)
+
+
+async def _finalize_dummy(websocket: WebSocket, session: _WsSession) -> str:
+    """흘린 더미 토큰을 답변으로 확정하고 종료 마커를 보낸다(청크 없으면 빈 답변).
+
+    실 STT 와 동일 규칙 — 청크가 하나도 없으면 자막·평가를 모두 생략한다.
+    """
+    if not session.transcript_sent:
+        return ''
+    await _send(websocket, service.transcript_final())
+    return service.dummy_answer_text(session.transcript_sent)
 
 
 async def _transcribe(websocket: WebSocket, session: _WsSession) -> str:
