@@ -22,14 +22,25 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from app.core.config import settings
-from app.interview import service
-from app.interview.schemas import ControlAction, ControlMessage, UpstreamMessage
+from app.interview import nonverbal, service
+from app.interview.schemas import (
+    ControlAction,
+    ControlMessage,
+    EventSnapshotMessage,
+    LandmarkFrameMessage,
+    UpstreamMessage,
+)
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix='/interviews', tags=['interview'])
 
 _upstream_adapter: TypeAdapter[UpstreamMessage] = TypeAdapter(UpstreamMessage)
+
+# 비언어 누적 상한 — 집계는 통계라 최근 N개면 충분하다. 긴 세션에서 무한 누적·
+# tuple 복사 비용(특히 event_snapshot 의 base64 image)을 막는 방어선이다.
+_MAX_LANDMARKS = 1200  # ~20분 @ 1s
+_MAX_EVENTS = 500
 
 
 @dataclass(frozen=True)
@@ -48,7 +59,14 @@ class _WsSession:
     awaiting_followup: bool = False
     current_question: str = ''
     audio_chunks: list[bytes] = field(default_factory=list)
+    # 더미 자막 모드에서 현재 답변에 흘린 부분 자막(=오디오 청크) 개수.
+    # answer_start·answer_end 마다 0 으로 리셋해 답변별로 토큰 순번을 새로 센다.
+    transcript_sent: int = 0
     history: tuple[service.Turn, ...] = ()
+    # 비언어 신호는 audio_chunks 와 달리 저빈도(landmark ~1s, event 발생 시)라
+    # 가변 list 대신 불변 tuple + replace 로 누적해 불변 패턴을 지킨다.
+    landmarks: tuple[LandmarkFrameMessage, ...] = ()
+    events: tuple[EventSnapshotMessage, ...] = ()
 
 
 async def _send(websocket: WebSocket, event: BaseModel) -> None:
@@ -77,10 +95,22 @@ async def interview_ws(websocket: WebSocket, session_id: str) -> None:
             if raw['type'] == 'websocket.disconnect':
                 break
 
-            # 바이너리(audio_chunk)는 JSON 스키마가 없는 답변 오디오 — 누적만 한다
+            # 바이너리(audio_chunk)는 JSON 스키마가 없는 답변 오디오.
+            #  - 더미 모드: 오디오는 쓰지 않으므로 버퍼링하지 않고, 청크마다 부분
+            #    자막만 흘려 자막이 흐르게 한다(OpenAI 호출 0, 불필요한 메모리 적재 0).
+            #  - 실 모드: answer_end 에 통전사하기 위해 누적만 한다.
             audio = raw.get('bytes')
             if audio is not None:
-                session.audio_chunks.append(audio)
+                if settings.interview_dummy_transcript:
+                    await _send(
+                        websocket,
+                        service.dummy_transcript_partial(session.transcript_sent),
+                    )
+                    session = replace(
+                        session, transcript_sent=session.transcript_sent + 1
+                    )
+                else:
+                    session.audio_chunks.append(audio)
                 continue
 
             text = raw.get('text')
@@ -101,13 +131,20 @@ async def _handle_message(
     websocket: WebSocket, message: UpstreamMessage, session: _WsSession
 ) -> _WsSession:
     """업스트림 메시지를 처리하고 갱신된 세션 상태를 반환한다."""
-    # landmark_frame·event_snapshot 은 비언어 지표 — Phase 4 에서 평가에 반영
+    # 비언어 신호는 다운스트림 응답 없이 세션에 누적만 한다 — 요약 시 집계에 쓰인다.
+    # 상한을 넘으면 가장 오래된 것부터 버려 메모리·복사 비용을 묶어둔다.
+    if isinstance(message, LandmarkFrameMessage):
+        landmarks = (session.landmarks + (message,))[-_MAX_LANDMARKS:]
+        return replace(session, landmarks=landmarks)
+    if isinstance(message, EventSnapshotMessage):
+        events = (session.events + (message,))[-_MAX_EVENTS:]
+        return replace(session, events=events)
     if not isinstance(message, ControlMessage):
         return session
 
     if message.action is ControlAction.ANSWER_START:
-        # 새 답변 시작 — 이전 답변의 누적 오디오를 비운다
-        return replace(session, audio_chunks=[])
+        # 새 답변 시작 — 이전 답변의 누적 오디오·자막 토큰 순번을 비운다
+        return replace(session, audio_chunks=[], transcript_sent=0)
 
     if message.action is ControlAction.ANSWER_END:
         return await _finish_answer(websocket, session)
@@ -119,12 +156,14 @@ async def _handle_message(
 
 
 async def _finish_answer(websocket: WebSocket, session: _WsSession) -> _WsSession:
-    """누적 오디오를 전사해 자막을 보내고 평가를 스트리밍한 뒤 턴을 기록한다.
+    """답변을 확정해 자막을 닫고 평가를 스트리밍한 뒤 턴을 기록한다.
 
-    빈 버퍼면 전사를 건너뛰고(불필요한 과금 방지), STT 장애 시 WS 를 끊지 않고
-    로깅 후 평가만 진행한다. 평가 토큰은 누적해 현재 턴의 평가로 저장한다.
+    답변 텍스트는 모드에 따라 다르게 얻는다 — 더미 모드면 흘린 토큰을 합치고,
+    실 모드면 누적 오디오를 전사한다. 빈 답변이면 평가를 건너뛰고(불필요한 과금
+    방지), STT 장애 시 WS 를 끊지 않고 로깅 후 평가만 진행한다. 평가 토큰은 누적해
+    현재 턴의 평가로 저장한다.
     """
-    answer = await _transcribe(websocket, session)
+    answer = await _resolve_answer(websocket, session)
 
     evaluation = ''
     async for event in service.stream_evaluation(session.current_question, answer):
@@ -132,7 +171,33 @@ async def _finish_answer(websocket: WebSocket, session: _WsSession) -> _WsSessio
         await _send(websocket, event)
 
     turn = service.Turn(session.current_question, answer, evaluation)
-    return replace(session, audio_chunks=[], history=session.history + (turn,))
+    return replace(
+        session,
+        audio_chunks=[],
+        transcript_sent=0,
+        history=session.history + (turn,),
+    )
+
+
+async def _resolve_answer(websocket: WebSocket, session: _WsSession) -> str:
+    """모드에 맞게 답변 텍스트를 얻으며 자막을 마무리한다(빈 답변은 '').
+
+    더미 모드는 종료 마커(isFinal=True)를, 실 모드는 통전사 자막(isFinal=True)을 보낸다.
+    """
+    if settings.interview_dummy_transcript:
+        return await _finalize_dummy(websocket, session)
+    return await _transcribe(websocket, session)
+
+
+async def _finalize_dummy(websocket: WebSocket, session: _WsSession) -> str:
+    """흘린 더미 토큰을 답변으로 확정하고 종료 마커를 보낸다(청크 없으면 빈 답변).
+
+    실 STT 와 동일 규칙 — 청크가 하나도 없으면 자막·평가를 모두 생략한다.
+    """
+    if not session.transcript_sent:
+        return ''
+    await _send(websocket, service.transcript_final())
+    return service.dummy_answer_text(session.transcript_sent)
 
 
 async def _transcribe(websocket: WebSocket, session: _WsSession) -> str:
@@ -188,5 +253,10 @@ async def _next_main_or_summary(
             awaiting_followup=False,
             current_question=text,
         )
-    await _send(websocket, await service.build_summary(session.history))
+    try:
+        metrics = nonverbal.aggregate(session.landmarks, session.events)
+    except Exception as error:  # noqa: BLE001 - 집계 실패가 요약을 막지 않게
+        logger.error('비언어 집계 실패, 빈 지표로 요약 진행: %s', error)
+        metrics = nonverbal.NonverbalMetrics()
+    await _send(websocket, await service.build_summary(session.history, metrics))
     return session

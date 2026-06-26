@@ -7,9 +7,10 @@ asyncio.run 으로 실행해 pytest-asyncio 의존성을 피한다.
 
 import asyncio
 from collections.abc import AsyncIterator
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
-from app.interview import context, llm, service, stt
+from app.interview import context, llm, nonverbal, service, stt
+from app.interview.schemas import EventSnapshotMessage, LandmarkFrameMessage
 
 
 # ── build_main_questions ──────────────────────────────────────────
@@ -150,7 +151,7 @@ def test_transcribe_answer_empty_returns_none(monkeypatch):
 
 
 def test_build_summary_maps_llm_fields(monkeypatch):
-    """LLM dict 를 SummaryEvent 로 매핑하고 비언어는 자리표시를 채운다."""
+    """LLM dict 를 SummaryEvent 로 매핑한다(비언어 미제공 시 점수 가감 없음)."""
     monkeypatch.setattr(
         llm,
         'generate_summary',
@@ -163,10 +164,61 @@ def test_build_summary_maps_llm_fields(monkeypatch):
         ),
     )
     summary = asyncio.run(service.build_summary((service.Turn('q', 'a', 'e'),)))
-    assert summary.overall_score == 75.0
+    assert summary.overall_score == 75.0  # 비언어 데이터 없음 → 가감 0
     assert summary.language_feedback == '논리적입니다'
     assert summary.improvements == ['결론 보강']  # 빈 항목 제거
-    assert 'Phase 4' in summary.nonverbal_feedback
+    assert summary.nonverbal_feedback  # placeholder 가 아닌 안내 문구
+    assert 'Phase' not in summary.nonverbal_feedback
+
+
+def test_build_summary_applies_nonverbal_penalty(monkeypatch):
+    """비언어 지표(시선이탈)가 있으면 점수를 깎고 피드백에 반영한다."""
+    monkeypatch.setattr(
+        llm,
+        'generate_summary',
+        AsyncMock(return_value={'overall_score': 90, 'language_feedback': '좋음'}),
+    )
+    frames = tuple(
+        LandmarkFrameMessage(gaze_x=0.9) for _ in range(5)
+    )
+    metrics = nonverbal.aggregate(frames, ())
+    summary = asyncio.run(service.build_summary((), metrics))
+    assert summary.overall_score < 90.0  # 시선이탈 감점 반영
+    assert '시선' in summary.nonverbal_feedback
+
+
+def test_build_summary_clamps_score_to_zero(monkeypatch):
+    """비언어 감점이 커도 점수는 0 미만으로 내려가지 않는다."""
+    monkeypatch.setattr(
+        llm,
+        'generate_summary',
+        AsyncMock(return_value={'overall_score': 5, 'language_feedback': 'x'}),
+    )
+    frames = tuple(LandmarkFrameMessage(gaze_x=1.0) for _ in range(10))
+    events = tuple(
+        EventSnapshotMessage(event='gaze_away', image='data:,') for _ in range(50)
+    )
+    metrics = nonverbal.aggregate(frames, events)
+    summary = asyncio.run(service.build_summary((), metrics))
+    assert summary.overall_score == 0.0
+
+
+def test_build_summary_survives_nonverbal_error(monkeypatch):
+    """비언어 환산이 예외를 던져도 요약은 0 가감·안내 문구로 계속 생성된다."""
+    monkeypatch.setattr(
+        llm,
+        'generate_summary',
+        AsyncMock(
+            return_value={'overall_score': 70, 'language_feedback': 'ok', 'improvements': []}
+        ),
+    )
+    monkeypatch.setattr(nonverbal, 'score_penalty', Mock(side_effect=RuntimeError('boom')))
+
+    summary = asyncio.run(service.build_summary((), nonverbal.NonverbalMetrics()))
+
+    assert summary.type == 'summary'
+    assert summary.overall_score == 70.0  # 감점 0 으로 우회(요약 안 끊김)
+    assert '오류' in summary.nonverbal_feedback
 
 
 def test_build_summary_falls_back_on_error(monkeypatch):
@@ -187,3 +239,13 @@ def test_build_summary_coerces_bad_score(monkeypatch):
     )
     summary = asyncio.run(service.build_summary(()))
     assert summary.overall_score == 0.0
+
+
+def test_build_summary_rejects_non_finite_score(monkeypatch):
+    """LLM 이 'nan'/'inf' 를 줘도 clamp 를 우회하지 못하고 0.0 으로 막힌다."""
+    for bad in ('nan', 'inf', '-inf'):
+        monkeypatch.setattr(
+            llm, 'generate_summary', AsyncMock(return_value={'overall_score': bad})
+        )
+        summary = asyncio.run(service.build_summary(()))
+        assert summary.overall_score == 0.0
