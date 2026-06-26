@@ -7,9 +7,6 @@ import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# 기존의 임포트 코드들...
-from app.auth import models as _auth_models
-
 import logging
 from collections.abc import AsyncIterator
 from contextlib import ExitStack, asynccontextmanager
