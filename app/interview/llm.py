@@ -53,9 +53,15 @@ async def _complete(messages: list[dict[str, str]]) -> str:
 
 
 async def generate_main_questions(context: str, count: int) -> list[str]:
-    """회사 컨텍스트로 메인 면접 질문 목록을 생성한다(빈 줄 제거·count 로 절단)."""
+    """회사 컨텍스트로 메인 면접 질문 목록을 생성한다(빈 줄·중복 제거 후 count 로 절단).
+
+    LLM 출력은 신뢰 불가 입력이라 빈 줄·앞뒤 공백·중복 질문을 후처리로 걸러낸다.
+    중복은 dict.fromkeys 로 입력 순서를 유지하며 제거한다. 개수가 count 에 못 미쳐도
+    여기서는 보충하지 않는다 — 기본 질문 보충은 호출부(service)가 담당한다.
+    """
     text = await _complete(prompts.main_questions_messages(context, count))
-    questions = [line.strip() for line in text.splitlines() if line.strip()]
+    lines = (line.strip() for line in text.splitlines() if line.strip())
+    questions = list(dict.fromkeys(lines))
     return questions[:count]
 
 
