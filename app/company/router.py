@@ -3,10 +3,14 @@
 response_model_by_alias=True 로 응답을 camelCase 로 내보내 프론트 계약에 맞춘다.
 """
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
+from pymongo.database import Database
+from sqlalchemy.orm import Session
 
 from app.company.schemas import CompanyReportOut
 from app.company.service import get_company_report
+from app.db.mongo import get_mongo_db
+from app.db.session import get_db
 
 router = APIRouter(prefix="/companies", tags=["company"])
 
@@ -16,6 +20,10 @@ router = APIRouter(prefix="/companies", tags=["company"])
     response_model=CompanyReportOut,
     response_model_by_alias=True,
 )
-async def read_company_report(company_id: str) -> CompanyReportOut:
+def read_company_report(
+    company_id: str,
+    db: Session = Depends(get_db),
+    mongo_db: Database = Depends(get_mongo_db),
+) -> CompanyReportOut:
     """기업 분석 리포트 조회."""
-    return await get_company_report(company_id)
+    return get_company_report(db, mongo_db, company_id)
