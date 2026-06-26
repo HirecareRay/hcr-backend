@@ -10,7 +10,6 @@ import json
 
 from fastapi import HTTPException
 from pymongo.database import Database
-from sqlalchemy.engine import RowMapping
 from sqlalchemy.orm import Session
 
 from app.company import repository
@@ -85,28 +84,28 @@ def _build_news(db: Session, sources_raw: object) -> list[NewsItem]:
     if not keys:
         return []
 
-    by_id = {r["id"]: r for r in repository.find_news_by_ids(db, keys)}
+    by_id = {n.id: n for n in repository.find_news_by_ids(db, keys)}
     items: list[NewsItem] = []
     for key in keys:  # sources 순서 유지
-        r = by_id.get(key)
-        if r is None:
+        n = by_id.get(key)
+        if n is None:
             continue
-        content = r["page_content"] or ""
+        content = n.page_content or ""
         if content.startswith("passage: "):  # 임베딩 입력용 접두사 제거
             content = content[len("passage: ") :]
         items.append(
             NewsItem(
-                id=r["id"],
-                article_id=_s(r["article_id"]),
-                company=_s(r["company"]),
-                title=_s(r["title"]),
-                media=_s(r["media"]),
-                url=_s(r["url"]),
-                date=_s(r["date"]),
-                article_idx=_i(r["article_idx"]),
-                article_type=_s(r["article_type"]),
-                paragraph_start=_i(r["paragraph_start"]),
-                news_count=_i(r["news_count"]),
+                id=n.id,
+                article_id=_s(n.article_id),
+                company=_s(n.company),
+                title=_s(n.title),
+                media=_s(n.media),
+                url=_s(n.url),
+                date=_s(n.date),
+                article_idx=_i(n.article_idx),
+                article_type=_s(n.article_type),
+                paragraph_start=_i(n.paragraph_start),
+                news_count=_i(n.news_count),
                 content=content,
             )
         )
@@ -151,7 +150,7 @@ def get_company_report(
 
     # company_analyses 는 24자 ObjectId 로 키가 잡혀 있다(companies._id).
     object_id = str(c["_id"])
-    a: RowMapping | dict = repository.find_company_analysis(db, object_id) or {}
+    a = repository.find_company_analysis(db, object_id)  # CompanyAnalysis | None
 
     return CompanyReportOut(
         company=Company(
@@ -167,7 +166,7 @@ def get_company_report(
             source="DART",
             profitability=[],
             stability=[],
-            summary=_summary(a.get("financial_analysis")),
+            summary=_summary(getattr(a, "financial_analysis", None)),
         ),
         employees=EmployeeSection(
             year="",
@@ -185,26 +184,26 @@ def get_company_report(
             ratings=[],
             pros=[],
             cons=[],
-            summary=_summary(a.get("jobplanet_review_summary")),
+            summary=_summary(getattr(a, "jobplanet_review_summary", None)),
             reviews=[],
         ),
         growth=GrowthSection(
-            summary=_summary(a.get("growth_potential")),
-            news=_build_news(db, a.get("sources")),
+            summary=_summary(getattr(a, "growth_potential", None)),
+            news=_build_news(db, getattr(a, "sources", None)),
         ),
         hiring=HiringSection(summary="", openings=[]),
         insight=InsightSection(
             headline="",
-            key_points=_texts(a.get("key_points")),
+            key_points=_texts(getattr(a, "key_points", None)),
             vision="",
             industry=_s(c.get("industry")),
             competitors=[],
             swot=SwotAnalysis(
-                strengths=_texts(a.get("swot_strengths")),
-                weaknesses=_texts(a.get("swot_weaknesses")),
-                opportunities=_texts(a.get("swot_opportunities")),
-                threats=_texts(a.get("swot_threats")),
+                strengths=_texts(getattr(a, "swot_strengths", None)),
+                weaknesses=_texts(getattr(a, "swot_weaknesses", None)),
+                opportunities=_texts(getattr(a, "swot_opportunities", None)),
+                threats=_texts(getattr(a, "swot_threats", None)),
             ),
         ),
-        generated_at=_s(a.get("generated_at")),
+        generated_at=_s(getattr(a, "generated_at", None)),
     )
