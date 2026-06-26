@@ -42,6 +42,49 @@ def _s(v: Any) -> str:
     return "" if v is None else str(v)
 
 
+# DART 지표 → 화면용 (값은 % 단위 비율)
+_PROFIT = [("매출총이익률", "매출총이익률"), ("순이익률", "순이익률"), ("ROE", "ROE"),
+           ("총자산영업이익률", "총자산영업이익률")]
+_STABLE = [("부채비율", "부채비율"), ("자기자본비율", "자기자본비율"), ("유동비율", "유동비율")]
+
+
+def _dart_financial(mongo, oid):
+    """dart_indicators(최신연도) → (연도, profitability[], stability[])."""
+    d = mongo["dart_indicators"].find_one({"company_id": oid}, sort=[("bsns_year", -1)])
+    if not d:
+        return "", [], []
+    ind = d.get("indicators") or {}
+    prof, stab = ind.get("수익성지표") or {}, ind.get("안정성지표") or {}
+    pf = [{"label": lbl, "value": prof.get(k), "unit": "%"}
+          for k, lbl in _PROFIT if isinstance(prof.get(k), (int, float))]
+    sb = [{"label": lbl, "value": stab.get(k), "unit": "%"}
+          for k, lbl in _STABLE if isinstance(stab.get(k), (int, float))]
+    return str(d.get("bsns_year") or ""), pf, sb
+
+
+def _dart_employees(mongo, oid):
+    """dart_employee.divisions(성별 분리) → 합산 임직원 현황. 없으면 None."""
+    d = mongo["dart_employee"].find_one({"company_id": oid}, sort=[("bsns_year", -1)])
+    if not d:
+        return None
+    male = female = tot_sal = ten_w = 0
+    for v in (d.get("divisions") or {}).values():
+        for g in ("male", "female"):
+            gd = v.get(g) or {}
+            hc = gd.get("head_count") or 0
+            male += hc if g == "male" else 0
+            female += hc if g == "female" else 0
+            tot_sal += gd.get("total_salary") or 0
+            ten_w += (gd.get("avg_tenure") or 0) * hc
+    total = male + female
+    return {
+        "year": str(d.get("bsns_year") or ""), "source": "DART",
+        "totalCount": total, "maleCount": male, "femaleCount": female,
+        "avgSalary": round(tot_sal / total) if total and tot_sal else None,
+        "avgTenureYears": round(ten_w / total, 1) if total and ten_w else None,
+    }
+
+
 class CompanyNotFound(Exception):
     pass
 
@@ -142,22 +185,23 @@ def build_company_report(company_id: str) -> dict:
         "history": [],                 # ponytail: company_pages 연혁 파싱 나중
     }
 
-    # ── financial (요약만 실데이터, 수치 배열은 빈값) ──
+    # ── financial (DART 지표 + 요약) ──
+    fin_year, profitability, stability = _dart_financial(mongo, company["_id"])
     financial = {
-        "year": "2025",
+        "year": fin_year or "2025",
         "source": "DART",
-        "profitability": [],           # ponytail: dart_indicators 파싱 나중
-        "stability": [],
+        "profitability": profitability,
+        "stability": stability,
         "summary": _summary(analysis.get("financial_analysis")),
     }
 
-    # ── employees (totalCount만, 상세는 0/null) ──
+    # ── employees (DART 직원현황, 없으면 프로필 인원수) ──
     emp = company.get("employee_count")
-    employees = {
+    employees = _dart_employees(mongo, company["_id"]) or {
         "year": "2025",
         "source": "DART",
         "totalCount": int(emp) if isinstance(emp, int) else 0,
-        "maleCount": 0, "femaleCount": 0,   # ponytail: dart_employee 파싱 나중
+        "maleCount": 0, "femaleCount": 0,
         "avgSalary": None, "avgTenureYears": None,
     }
 
