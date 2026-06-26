@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from bson import ObjectId
@@ -43,6 +44,32 @@ def _s(v: Any) -> str:
 
 class CompanyNotFound(Exception):
     pass
+
+
+def _logo(name: str) -> str:
+    n = re.sub(r"^\(?주\)?|㈜", "", name or "").strip()
+    return (n[:2].upper() if n else "?")
+
+
+def search_companies(q: str, limit: int = 20) -> list[dict]:
+    """회사명/업종 부분일치 검색 → FE CompanySearchResult 형태 리스트. q 비면 [] ."""
+    q = (q or "").strip()
+    if not q:
+        return []
+    rx = {"$regex": re.escape(q), "$options": "i"}
+    cur = getMongoDatabase()["companies"].find(
+        {"$or": [{"company_name": rx}, {"industry": rx}]},
+        {"company_name": 1, "industry": 1, "company_size": 1, "company_type": 1,
+         "founded": 1, "employee_count": 1},
+    ).limit(limit)
+    return [{
+        "id": str(c["_id"]), "key": str(c["_id"]),
+        "name": _s(c.get("company_name")), "industry": _s(c.get("industry")),
+        "companySize": _s(c.get("company_size")), "companyType": _s(c.get("company_type")),
+        "founded": _s(c.get("founded")), "employeeCount": _s(c.get("employee_count")),
+        "category": "미디어",          # ponytail: FE 더미 enum placeholder, 일반화는 나중
+        "logoText": _logo(c.get("company_name")),
+    } for c in cur]
 
 
 def build_company_report(company_id: str) -> dict:

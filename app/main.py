@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import settings
 from app.core.mongo import closeMongo, connectMongo, getMongoDatabase, pingMongo
-from app.report import CompanyNotFound, build_company_report
+from app.report import CompanyNotFound, build_company_report, search_companies
 
 app = FastAPI(title=settings.appName)
 
@@ -50,6 +50,15 @@ def mongoHealthCheck():
     except Exception as e:
         return {"status": "error", "mongo": "down", "detail": str(e)}
     return {"status": "ok", "mongo": "up", "database": settings.mongodbDatabase}
+
+
+@app.get("/companies/search")
+def searchCompaniesRoute(q: str = ""):
+    """회사명/업종 검색 — q 부분일치, FE CompanySearchResult 리스트.
+
+    주의: /companies/{company_id} 보다 먼저 정의해야 'search'가 id로 안 잡힘.
+    """
+    return search_companies(q)
 
 
 @app.get("/companies/{company_id}")
