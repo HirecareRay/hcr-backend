@@ -175,7 +175,9 @@ def test_ws_next_after_followup_answer_advances_to_next_main(monkeypatch):
 
 
 def test_ws_summary_after_main_questions_exhausted(monkeypatch):
-    # 메인 1개로 줄여 빠르게 소진 → 꼬리 1번 후 요약
+    # 메인 1개로 줄여 빠르게 소진 → 꼬리 1번 후 요약.
+    # count 도 1 로 맞춰 부족분 보충(_ensure_question_count)이 끼어들지 않게 한다.
+    monkeypatch.setattr(settings, 'interview_main_question_count', 1)
     _patch_llm(monkeypatch, main_questions=['자기소개 부탁드립니다'])
 
     with client.websocket_connect('/interviews/ws/s1') as ws:
