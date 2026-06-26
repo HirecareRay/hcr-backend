@@ -4,6 +4,7 @@
 않고, .env.example만 공유한다. 새 환경변수가 생기면 여기에 필드를 추가한다.
 """
 
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -15,14 +16,24 @@ class Settings(BaseSettings):
     # CORS 허용 출처 (프론트 개발 서버)
     frontendOrigin: str = "http://localhost:3000"
 
-    # DB 연동 단계에서 채울 예정
-    # mariadbUrl: str = ""
-    # mongodbUri: str = ""
+    # DB 연동
+    mariadbUrl: str = Field(
+        default="",
+        validation_alias=AliasChoices("MARIADB_URL", "MARIADBURL"),
+    )
+    mongodbUri: str = Field(
+        default="",
+        validation_alias=AliasChoices("MONGODB_URI", "MONGODBURI", "MONGO_URI"),
+    )
+    mongodbDatabase: str = Field(
+        default="hcr",
+        validation_alias=AliasChoices("MONGODB_DATABASE", "MONGODBDATABASE"),
+    )
 
     # LLM 연동 단계에서 채울 예정
     # openaiApiKey: str = ""
 
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
 
 settings = Settings()
