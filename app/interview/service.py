@@ -13,7 +13,7 @@ import math
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
-from app.interview import context, llm, nonverbal, stt
+from app.interview import context, dummy_transcript, llm, nonverbal, stt
 from app.interview.nonverbal import NonverbalMetrics
 from app.interview.schemas import (
     EvalDeltaEvent,
@@ -60,6 +60,24 @@ async def transcribe_answer(audio: bytes) -> TranscriptDeltaEvent | None:
     if not text:
         return None
     return TranscriptDeltaEvent(delta=text, is_final=True)
+
+
+def dummy_transcript_partial(index: int) -> TranscriptDeltaEvent:
+    """더미 부분 자막 이벤트(isFinal=False) — 오디오 청크 1개당 토큰 1개.
+
+    프론트가 delta 를 이어 붙여 자막이 흐르게 한다(실 STT 호출 없음, 비용 0).
+    """
+    return TranscriptDeltaEvent(delta=dummy_transcript.token_at(index), is_final=False)
+
+
+def transcript_final() -> TranscriptDeltaEvent:
+    """자막 종료 마커(isFinal=True, 추가 토큰 없음) — 캡션을 닫는 신호."""
+    return TranscriptDeltaEvent(delta='', is_final=True)
+
+
+def dummy_answer_text(chunk_count: int) -> str:
+    """흘린 더미 토큰을 합친 답변 본문(평가·요약 입력). 청크 0 이면 빈 답변."""
+    return dummy_transcript.answer_text(chunk_count)
 
 
 async def stream_evaluation(

@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock, Mock
 
 from fastapi.testclient import TestClient
 
+from app.core.config import settings
 from app.interview import llm, nonverbal, stt
 from app.main import app
 
@@ -48,7 +49,12 @@ def _patch_llm(
     summary: dict | None = None,
     transcribe: str = '제 강점은 협업입니다',
 ) -> None:
-    """면접 LLM·STT 경계를 결정론적 mock 으로 대체한다(실 API 미호출)."""
+    """면접 LLM·STT 경계를 결정론적 mock 으로 대체한다(실 API 미호출).
+
+    더미 자막 플래그는 명시적으로 끈다 — 이 헬퍼를 쓰는 테스트는 실 STT 경로
+    (answer_end 통전사) 를 검증하므로, 환경변수 누수로 더미가 켜져도 영향받지 않게 한다.
+    """
+    monkeypatch.setattr(settings, 'interview_dummy_transcript', False)
     monkeypatch.setattr(
         llm,
         'generate_main_questions',
@@ -261,3 +267,72 @@ def test_ws_summary_sent_even_if_nonverbal_aggregate_raises(monkeypatch):
 
     assert summary['type'] == 'summary'
     assert summary['overallScore'] == 80.0  # 집계 실패 → 감점 0 으로 우회
+
+
+# ── 더미 자막 스트리밍 모드 (interview_dummy_transcript=True) ──────────
+
+
+def test_ws_dummy_mode_streams_partial_transcript_per_chunk(monkeypatch):
+    """더미 모드: 오디오 청크마다 부분 자막(isFinal=False)이 즉시 흐르고,
+    answer_end 에 종료 마커(isFinal=True)가 온 뒤 평가가 스트리밍된다.
+    실 STT(whisper-1)는 호출되지 않는다(과금 0)."""
+    _patch_llm(monkeypatch, eval_deltas=['좋은 ', '답변'])
+    monkeypatch.setattr(settings, 'interview_dummy_transcript', True)
+
+    with client.websocket_connect('/interviews/ws/s1') as ws:
+        ws.receive_json()  # 첫 질문
+        ws.send_json({'type': 'control', 'action': 'answer_start'})
+        ws.send_bytes(b'c1')
+        p1 = ws.receive_json()  # 청크 즉시 부분 자막
+        ws.send_bytes(b'c2')
+        p2 = ws.receive_json()
+        ws.send_json({'type': 'control', 'action': 'answer_end'})
+        final = ws.receive_json()  # 종료 마커
+        evals = [ws.receive_json() for _ in range(2)]
+
+    assert p1['type'] == 'transcript_delta' and p1['isFinal'] is False
+    assert p1['delta']  # 비지 않은 토큰
+    assert p2['type'] == 'transcript_delta' and p2['isFinal'] is False
+    assert p1['delta'] != p2['delta']  # 청크마다 다른 토큰이 이어짐
+    assert final['type'] == 'transcript_delta' and final['isFinal'] is True
+    assert [e['type'] for e in evals] == ['eval_delta'] * 2  # 더미 답변도 평가됨
+    stt.transcribe_audio.assert_not_awaited()  # 더미 모드 → STT 미호출(과금 0)
+
+
+def test_ws_dummy_mode_empty_answer_skips_final_and_eval(monkeypatch):
+    """더미 모드라도 청크가 하나도 없으면 종료 마커·평가를 생략한다(실 경로와 동일 규칙)."""
+    _patch_llm(monkeypatch)
+    monkeypatch.setattr(settings, 'interview_dummy_transcript', True)
+
+    with client.websocket_connect('/interviews/ws/s1') as ws:
+        ws.receive_json()  # 첫 질문
+        ws.send_json({'type': 'control', 'action': 'answer_start'})  # 청크 없음
+        ws.send_json({'type': 'control', 'action': 'answer_end'})  # 빈 답변
+        ws.send_json({'type': 'control', 'action': 'next'})
+        nxt = ws.receive_json()
+
+    # 빈 답변 → 꼬리질문도 생략 → 곧장 다음 메인 질문
+    assert nxt['questionId'] == 'm1'
+    stt.transcribe_audio.assert_not_awaited()
+
+
+def test_ws_dummy_mode_resets_token_sequence_each_answer(monkeypatch):
+    """answer_start 가 자막 토큰 순번을 리셋해, 새 답변의 첫 자막이 다시 첫 토큰부터 시작한다."""
+    _patch_llm(monkeypatch, main_questions=['자기소개', '강점은?'], eval_deltas=['ok'])
+    monkeypatch.setattr(settings, 'interview_dummy_transcript', True)
+
+    with client.websocket_connect('/interviews/ws/s1') as ws:
+        ws.receive_json()  # m0
+        ws.send_json({'type': 'control', 'action': 'answer_start'})
+        ws.send_bytes(b'a1')
+        first_answer_token = ws.receive_json()['delta']
+        ws.send_json({'type': 'control', 'action': 'answer_end'})
+        _drain(ws, 2)  # 종료 마커 + eval
+        ws.send_json({'type': 'control', 'action': 'next'})  # 꼬리질문
+        ws.receive_json()
+        # 새 답변 시작 → 토큰 순번 리셋
+        ws.send_json({'type': 'control', 'action': 'answer_start'})
+        ws.send_bytes(b'b1')
+        second_answer_token = ws.receive_json()['delta']
+
+    assert first_answer_token == second_answer_token  # 둘 다 첫 토큰부터
