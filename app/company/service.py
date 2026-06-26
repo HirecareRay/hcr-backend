@@ -1,17 +1,283 @@
-"""기업 분석 비즈니스 로직 — DB 조회·LLM·RAG를 조합해 리포트를 만든다.
+"""기업 분석 비즈니스 로직 — DB 데이터를 프론트 스키마(camelCase 8섹션) dict 로 조립.
 
-라우터는 여기로 위임하고, 여기서 repository(DB) + LLM/RAG 를 조합한다.
-지금은 더미를 반환하며, 실연결 지점은 TODO 로 표시한다.
+라우터는 여기로 위임하고, 여기서 repository(MariaDB ORM + MongoDB)를 조합한다.
+무거운 수치(재무지표·임직원)는 DART 실데이터로 채운다.
+식별자 = 회사 ObjectId(24자) — 프론트가 ObjectId 를 넘긴다.
 """
 
-from app.company.schemas import CompanyReportOut
+import json
+import re
+from typing import Any
+
+from pymongo.database import Database
+from sqlalchemy.orm import Session
+
+from app.company import repository
 
 
-async def get_company_report(company_id: str) -> CompanyReportOut:
-    """기업 분석 리포트 생성.
+class CompanyNotFound(Exception):
+    """회사 ObjectId 가 companies 에 없을 때."""
 
-    실연결 단계: repository 로 DART·크롤러·뉴스 조회 → LLM/RAG 분석 → 조합.
-    현재는 프론트 BFF 더미와 동일 형태의 자리표시 값을 반환한다.
-    """
-    # TODO: repository(DB) + LLM/RAG 연결로 교체
-    return CompanyReportOut(company_id=company_id, company_name="(미구현)")
+
+# ── JSON·문자열 헬퍼 ──────────────────────────────────────────────────
+def _loads(raw: Any, default):
+    try:
+        return json.loads(raw) if raw else default
+    except (json.JSONDecodeError, TypeError):
+        return default
+
+
+def _summary(raw: Any) -> str:
+    """company_analyses 섹션({summary, evidence})에서 summary만."""
+    d = _loads(raw, {})
+    return d.get("summary", "") if isinstance(d, dict) else ""
+
+
+def _texts(raw: Any) -> list[str]:
+    """[{text, ...}] JSON 컬럼에서 text 리스트만."""
+    return [x.get("text", "") for x in _loads(raw, []) if isinstance(x, dict) and x.get("text")]
+
+
+def _s(v: Any) -> str:
+    return "" if v is None else str(v)
+
+
+def _logo(name: str) -> str:
+    n = re.sub(r"^\(?주\)?|㈜", "", name or "").strip()
+    return n[:2].upper() if n else "?"
+
+
+# ── DART 변환 (raw 문서 → 화면용) ─────────────────────────────────────
+_PROFIT = [("매출총이익률", "매출총이익률"), ("순이익률", "순이익률"), ("ROE", "ROE"),
+           ("총자산영업이익률", "총자산영업이익률")]
+_STABLE = [("부채비율", "부채비율"), ("자기자본비율", "자기자본비율"), ("유동비율", "유동비율")]
+_SCORE_LABELS = [("advancement_rating", "승진/성장"), ("compensation_rating", "급여/복지"),
+                 ("worklife_balance_rating", "워라밸"), ("culture_rating", "사내문화"),
+                 ("management_rating", "경영진")]
+
+
+def _dart_financial(mongo: Database, oid) -> tuple[str, list[dict], list[dict]]:
+    """dart_indicators(최신연도) → (연도, profitability[], stability[])."""
+    d = repository.find_dart_indicators(mongo, oid)
+    if not d:
+        return "", [], []
+    ind = d.get("indicators") or {}
+    prof, stab = ind.get("수익성지표") or {}, ind.get("안정성지표") or {}
+    pf = [{"label": lbl, "value": prof.get(k), "unit": "%"}
+          for k, lbl in _PROFIT if isinstance(prof.get(k), (int, float))]
+    sb = [{"label": lbl, "value": stab.get(k), "unit": "%"}
+          for k, lbl in _STABLE if isinstance(stab.get(k), (int, float))]
+    return str(d.get("bsns_year") or ""), pf, sb
+
+
+def _dart_employees(mongo: Database, oid) -> dict | None:
+    """dart_employee.divisions(성별 분리) → 합산 임직원 현황. 없으면 None."""
+    d = repository.find_dart_employee(mongo, oid)
+    if not d:
+        return None
+    male = female = tot_sal = ten_w = 0
+    for v in (d.get("divisions") or {}).values():
+        for g in ("male", "female"):
+            gd = v.get(g) or {}
+            hc = gd.get("head_count") or 0
+            male += hc if g == "male" else 0
+            female += hc if g == "female" else 0
+            tot_sal += gd.get("total_salary") or 0
+            ten_w += (gd.get("avg_tenure") or 0) * hc
+    total = male + female
+    return {
+        "year": str(d.get("bsns_year") or ""), "source": "DART",
+        "totalCount": total, "maleCount": male, "femaleCount": female,
+        "avgSalary": round(tot_sal / total) if total and tot_sal else None,
+        "avgTenureYears": round(ten_w / total, 1) if total and ten_w else None,
+    }
+
+
+# ── 검색 ──────────────────────────────────────────────────────────────
+def search_companies(mongo: Database, q: str, limit: int = 20) -> list[dict]:
+    """회사명/업종 부분일치 → FE CompanySearchResult 리스트. q 비면 []."""
+    q = (q or "").strip()
+    if not q:
+        return []
+    rx = {"$regex": re.escape(q), "$options": "i"}
+    return [{
+        "id": str(c["_id"]), "key": str(c["_id"]),
+        "name": _s(c.get("company_name")), "industry": _s(c.get("industry")),
+        "companySize": _s(c.get("company_size")), "companyType": _s(c.get("company_type")),
+        "founded": _s(c.get("founded")), "employeeCount": _s(c.get("employee_count")),
+        "category": "미디어",          # ponytail: FE 더미 enum placeholder, 일반화 나중
+        "logoText": _logo(c.get("company_name")),
+    } for c in repository.search_companies(mongo, rx, limit)]
+
+
+def get_company(mongo: Database, company_id: str) -> dict:
+    """회사 기본정보 1건(_id 문자열화). 없으면 CompanyNotFound."""
+    doc = repository.find_company(mongo, company_id)
+    if doc is None:
+        raise CompanyNotFound(company_id)
+    doc["_id"] = str(doc["_id"])
+    return doc
+
+
+# ── 리포트 조립 ────────────────────────────────────────────────────────
+def build_company_report(db: Session, mongo: Database, company_id: str) -> dict:
+    """company_id(24자 ObjectId) → 보고서 dict(8섹션). 없으면 CompanyNotFound."""
+    company = repository.find_company(mongo, company_id)
+    if company is None:
+        raise CompanyNotFound(company_id)
+    oid = company["_id"]
+
+    analysis = repository.find_analysis(db, company_id)
+    crawler = repository.find_crawler(db, company_id)
+    jp_count, jp_avg = repository.jobplanet_aggregate(db, company_id)
+    jp_rows = repository.find_reviews(db, company_id)
+    news_rows = repository.find_news(db, company_id)
+    job_rows = repository.find_jobs(db, company_id)
+    sim_ids = repository.find_similar_ids(db, company_id)
+
+    def _a(name: str):  # analysis 속성(없으면 None)
+        return getattr(analysis, name, None)
+
+    industry = _s(company.get("industry"))
+
+    # ── overview ──
+    profile = {
+        "industry": industry,
+        "companySize": _s(company.get("company_size")),
+        "companyType": _s(company.get("company_type")),
+        "founded": _s(company.get("founded")),
+        "ceo": _s(company.get("ceo")),
+        "employeeCount": _s(company.get("employee_count")),
+        "revenue": _s(company.get("revenue")),
+        "capital": "",                 # ponytail: DART 자본금 미적재
+        "entrySalary": "",             # ponytail: 초봉 미적재
+        "address": _s(company.get("address")),
+        "mainBusiness": _s(company.get("main_business")),
+        "creditRating": None,
+        "insurance": [],
+    }
+    cr_mps = getattr(crawler, "main_products_services", None)
+    overview = {
+        "businessDescription": _s(getattr(crawler, "business_description", None)),
+        "mainProductsServices": _loads(cr_mps, []) if cr_mps else [],
+        "talentValues": None,
+        "ceoMessage": getattr(crawler, "ceo_message", None) or None,
+        "websiteUrl": company.get("website_url") or getattr(crawler, "website_url", None) or None,
+        "profile": profile,
+        "history": [],                 # ponytail: company_pages 연혁 파싱 나중
+    }
+
+    # ── financial (DART 지표 + 요약) ──
+    fin_year, profitability, stability = _dart_financial(mongo, oid)
+    financial = {
+        "year": fin_year or "2025",
+        "source": "DART",
+        "profitability": profitability,
+        "stability": stability,
+        "summary": _summary(_a("financial_analysis")),
+    }
+
+    # ── employees (DART 직원현황, 없으면 프로필 인원수) ──
+    emp = company.get("employee_count")
+    employees = _dart_employees(mongo, oid) or {
+        "year": "2025", "source": "DART",
+        "totalCount": int(emp) if isinstance(emp, int) else 0,
+        "maleCount": 0, "femaleCount": 0, "avgSalary": None, "avgTenureYears": None,
+    }
+
+    # ── review (잡플래닛 실데이터) ──
+    review_items, dim_sums = [], {k: [] for k, _ in _SCORE_LABELS}
+    for r in jp_rows:
+        sc = _loads(r.score, {})
+        for k, _ in _SCORE_LABELS:
+            if isinstance(sc.get(k), (int, float)):
+                dim_sums[k].append(sc[k])
+        review_items.append({
+            "id": int(r.id),
+            "rating": int(r.overall or 0),
+            "title": _s(r.title), "pros": _s(r.pros), "cons": _s(r.cons),
+            "occupation": _s(r.occupation_name), "employStatus": _s(r.employ_status_name),
+            "date": _s(r.review_date), "helpfulCount": int(r.helpful_count or 0),
+            "scores": {
+                "advancement": int(sc.get("advancement_rating") or 0),
+                "compensation": int(sc.get("compensation_rating") or 0),
+                "worklifeBalance": int(sc.get("worklife_balance_rating") or 0),
+                "culture": int(sc.get("culture_rating") or 0),
+                "management": int(sc.get("management_rating") or 0),
+            },
+        })
+    ratings = [{"label": lbl, "score": round(sum(dim_sums[k]) / len(dim_sums[k]), 1) if dim_sums[k] else 0}
+               for k, lbl in _SCORE_LABELS]
+    review = {
+        "source": "잡플래닛",
+        "overallRating": round(jp_avg, 1),
+        "reviewCount": jp_count,
+        "ratings": ratings,
+        "pros": [], "cons": [],        # ponytail: pros/cons 키워드 집계 나중
+        "summary": _summary(_a("jobplanet_review_summary")),
+        "reviews": review_items,
+    }
+
+    # ── growth (요약 + 뉴스) ──
+    growth = {
+        "summary": _summary(_a("growth_potential")),
+        "news": [{
+            "id": _s(n.id), "articleId": _s(n.article_id), "company": _s(n.company),
+            "title": _s(n.title), "media": _s(n.media), "url": _s(n.url),
+            "date": _s(n.date), "articleIdx": int(n.article_idx or 0),
+            "articleType": _s(n.article_type), "paragraphStart": int(n.paragraph_start or 0),
+            "newsCount": int(n.news_count or 0), "content": _s(n.page_content),
+        } for n in news_rows],
+    }
+
+    # ── hiring (공고 카드 — 상세는 빈값) ──
+    def _empty_job():
+        return {"name": "", "headcount": "", "locations": [], "responsibilities": [],
+                "requirements": [], "preferred": []}
+    openings = [{
+        "id": _s(j.id), "companyName": _s(j.company_name),
+        "title": _s(j.posting_title), "url": _s(j.source_url),
+        "job": _empty_job(),
+        "qualification": {"education": "", "major": "", "documents": []},
+        "process": [],
+        "workConditions": {"employmentType": "", "workType": "", "salary": "",
+                           "benefits": [], "deadline": None, "deadlineType": ""},
+    } for j in job_rows]   # ponytail: 상세는 job_postings 리치 재적재 시 채움
+    hiring = {"summary": "", "openings": openings}
+
+    # ── insight (swot/key_points + 유사기업) ──
+    comp_names = repository.find_companies_by_ids(mongo, sim_ids)
+    competitors = [{"name": _s(comp_names[s].get("company_name")), "description": _s(comp_names[s].get("industry"))}
+                   for s in sim_ids if s in comp_names]
+    key_points = _texts(_a("key_points"))
+    insight = {
+        "headline": (key_points[0] if key_points else _s(company.get("company_name"))),
+        "keyPoints": key_points,
+        "vision": "",                  # ponytail: 비전 전용 필드 없음
+        "industry": industry,
+        "competitors": competitors,
+        "swot": {
+            "strengths": _texts(_a("swot_strengths")),
+            "weaknesses": _texts(_a("swot_weaknesses")),
+            "opportunities": _texts(_a("swot_opportunities")),
+            "threats": _texts(_a("swot_threats")),
+        },
+    }
+
+    return {
+        "company": {
+            "id": company_id,
+            "name": _s(company.get("company_name")),
+            "corpCode": "",            # ponytail: company_corp_codes 미연동
+            "stockCode": None,
+            "industry": industry,
+        },
+        "overview": overview,
+        "financial": financial,
+        "employees": employees,
+        "review": review,
+        "growth": growth,
+        "hiring": hiring,
+        "insight": insight,
+        "generatedAt": _s(_a("generated_at")) or "",
+    }
