@@ -215,6 +215,8 @@ def test_ws_landmark_frame_has_no_downstream_response(monkeypatch):
 
 def test_ws_accumulated_landmarks_reflected_in_summary(monkeypatch):
     """답변 중 보낸 시선이탈 landmark 가 최종 요약의 비언어 피드백·점수에 반영된다."""
+    # 메인 1개로 빠르게 소진 → count 도 1 로 맞춰 부족분 보충이 끼어들지 않게 한다.
+    monkeypatch.setattr(settings, 'interview_main_question_count', 1)
     _patch_llm(
         monkeypatch,
         main_questions=['자기소개 부탁드립니다'],
@@ -246,6 +248,8 @@ def test_ws_accumulated_landmarks_reflected_in_summary(monkeypatch):
 
 def test_ws_summary_sent_even_if_nonverbal_aggregate_raises(monkeypatch):
     """비언어 집계가 예외를 던져도 최종 요약은 끊기지 않고 전송된다(데모 보호)."""
+    # 메인 1개로 빠르게 소진 → count 도 1 로 맞춰 부족분 보충이 끼어들지 않게 한다.
+    monkeypatch.setattr(settings, 'interview_main_question_count', 1)
     _patch_llm(
         monkeypatch,
         main_questions=['자기소개 부탁드립니다'],
