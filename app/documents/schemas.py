@@ -1,5 +1,5 @@
-from typing import List, Optional
-from pydantic import BaseModel, ConfigDict
+from typing import List, Optional, Union, Literal
+from pydantic import BaseModel, ConfigDict, Field
 
 class StrictModel(BaseModel):
     """지정되지 않은 임의의 필드 유입을 방지하는 엄격한 베이스 모델"""
@@ -71,7 +71,7 @@ class Resume(StrictModel):
     awards: List[Award] = None
     education: List[Education] = None
     tools_skills: List[ToolSkill] = None
-    modify_datetime: Optional[str] = None
+    created_datetime: Optional[str] = None
 
 
 # =========================
@@ -88,7 +88,7 @@ class CoverLetterItem(StrictModel):
 class CoverLetter(StrictModel):
     """자기소개서 전체 문항들을 담는 검증 스키마"""
     items: List[CoverLetterItem] = None
-    modify_datetime: Optional[str] = None
+    created_datetime: Optional[str] = None
 
 
 # =========================
@@ -112,7 +112,7 @@ class Project(StrictModel):
     content: Optional[str] = None
     result: Optional[str] = None
     etc: Etc | None = None
-
+    created_datetime: Optional[str] = None
 
 # 포트폴리오 파싱을 통해 추출할 프로젝트 목록 스키마
 class Portfolio(StrictModel):
@@ -139,16 +139,57 @@ class WorkExperience(StrictModel):
 class WorkExperiences(StrictModel):
     """경력기술서 전체 파싱을 전담할 독립 스키마 Wrapper"""
     work_experience: List[WorkExperience] = None
+    created_datetime: Optional[str] = None
 
-# =========================
-# 최종 통합 데이터 출력 모델
-# =========================
+# =============================================================
+# [교정 완료] 잘못된 프롬프트 차단 및 개별 문서 생성 제어용 라우팅 스키마
+# (OpenAI strict 모드 호환을 위해 Union 대신 단일 Optional 구조 채택)
+# =============================================================
 
-class ApplicantDocument(StrictModel):
-    """4개 문서 파싱 결과를 최종 병합 및 표현할 때 사용하는 종합 스키마"""
-    user_id: str | None = None
-    resume: Resume | None = None
-    cover_letter: CoverLetter | None = None
-    projects: List[Project] = None
-    work_experience: List[WorkExperience] = None
-    etc: Etc | None = None
+class ResumeRoute(BaseModel):
+    """이력서 체인 전용 최종 통합 구조 분기 래퍼"""
+    # success 또는 fail 상태를 모델이 명확히 선택하도록 유도합니다
+    response_type: Literal["success", "fail"] = Field(
+        ..., 
+        description="이력서가 정상 추출되면 'success', 구직 서류와 무관한 잘못된 문서라면 'fail'로 지정하세요."
+    )
+    
+    # [성공 데이터 필드]
+    resume: Optional[Resume] = Field(None, description="성공적으로 빌드된 이력서 본문 데이터 (response_type이 'success'일 때만 채움)")
+    
+    # [실패 거절 필드]
+    reason: Optional[str] = Field(None, description="문서를 생성하거나 처리할 수 없는 구체적인 이유 설명 (response_type이 'fail'일 때만 채움)")
+    suggestion: Optional[str] = Field(None, description="사용자가 올바른 요청을 할 수 있도록 돕는 유도 가이드라인 문구 (response_type이 'fail'일 때만 채움)")
+
+
+class CoverLetterRoute(BaseModel):
+    """자기소개서 체인 전용 최종 통합 구조 분기 래퍼"""
+    response_type: Literal["success", "fail"] = Field(
+        ..., 
+        description="자기소개서가 정상 추출되면 'success', 잘못된 문서라면 'fail'로 지정하세요."
+    )
+    cover_letter: Optional[CoverLetter] = Field(None, description="성공적으로 빌드된 자기소개서 데이터")
+    reason: Optional[str] = Field(None, description="문서를 처리할 수 없는 구체적인 이유")
+    suggestion: Optional[str] = Field(None, description="올바른 입력을 돕는 가이드라인")
+
+
+class PortfolioRoute(BaseModel):
+    """포트폴리오 체인 전용 최종 통합 구조 분기 래퍼"""
+    response_type: Literal["success", "fail"] = Field(
+        ..., 
+        description="포트폴리오가 정상 추출되면 'success', 잘못된 문서라면 'fail'로 지정하세요."
+    )
+    portfolio: Optional[Portfolio] = Field(None, description="성공적으로 빌드된 포트폴리오 프로젝트 데이터")
+    reason: Optional[str] = Field(None, description="문서를 처리할 수 없는 구체적인 이유")
+    suggestion: Optional[str] = Field(None, description="올바른 입력을 돕는 가이드라인")
+
+
+class WorkExperiencesRoute(BaseModel):
+    """경력기술서 체인 전용 최종 통합 구조 분기 래퍼"""
+    response_type: Literal["success", "fail"] = Field(
+        ..., 
+        description="경력기술서가 정상 추출되면 'success', 잘못된 문서라면 'fail'로 지정하세요."
+    )
+    work_experiences: Optional[WorkExperiences] = Field(None, description="성공적으로 빌드된 경력기술서 전체 데이터")
+    reason: Optional[str] = Field(None, description="문서를 처리할 수 없는 구체적인 이유")
+    suggestion: Optional[str] = Field(None, description="올바른 입력을 돕는 가이드라인")
