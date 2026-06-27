@@ -112,12 +112,12 @@ class Project(StrictModel):
     content: Optional[str] = None
     result: Optional[str] = None
     etc: Etc | None = None
-    created_datetime: Optional[str] = None
 
 # 포트폴리오 파싱을 통해 추출할 프로젝트 목록 스키마
 class Portfolio(StrictModel):
     """포트폴리오 PDF 파싱을 전담할 독립 스키마 Wrapper"""
     projects: List[Project] = None
+    created_datetime: Optional[str] = None
 
 
 # =========================

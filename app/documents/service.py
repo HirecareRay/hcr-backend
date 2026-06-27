@@ -161,19 +161,26 @@ doc_type: {doc_type}
     # 스키마 Wrapper의 계층 구조를 단순화하여 데이터만 추출
     if doc_type == "resume":
         final_data = result_dict.get("resume") or {}
+        final_data.update({"created_datetime": datetime.now().strftime('%Y-%m-%d %H:%M:%S')})
     elif doc_type == "cover_letter":
         final_data = result_dict.get("cover_letter") or {}
+        final_data.update({"created_datetime": datetime.now().strftime('%Y-%m-%d %H:%M:%S')})
     elif doc_type == "portfolio":
         # portfolio_success 라우팅 래퍼 내부의 portfolio 스키마 객체에서 다시 projects 리스트를 추출합니다.
         portfolio_obj = result_dict.get("portfolio") or {}
         final_data = portfolio_obj.get("projects") or []
+        if final_data:
+            final_data = {"portfolio": final_data}
+            final_data.update({"created_datetime": datetime.now().strftime('%Y-%m-%d %H:%M:%S')})
     elif doc_type == "work_experience":
         # work_experiences_success 라우팅 래퍼 내부의 work_experiences 스키마 객체에서 다시 work_experience 리스트를 추출합니다.
         work_exp_obj = result_dict.get("work_experiences") or {}
         final_data = work_exp_obj.get("work_experience") or []
+        if final_data:
+            final_data = {"work_experience": final_data}
+            final_data.update({"created_datetime": datetime.now().strftime('%Y-%m-%d %H:%M:%S')})
     else:
         final_data = result_dict
-    final_data.update({"created_datetime": datetime.now().strftime('%Y-%m-%d %H:%M:%S')})
 
 
     # # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
