@@ -1,3 +1,4 @@
+from datetime import datetime
 import os
 import fitz
 import json
@@ -8,10 +9,33 @@ from langchain_core.prompts import ChatPromptTemplate
 from fastapi import UploadFile
 
 from app.core.config import settings
-from app.documents.schemas import Resume, CoverLetter, Portfolio, WorkExperiences
+from app.documents.schemas import ResumeRoute, CoverLetterRoute, PortfolioRoute, WorkExperiencesRoute 
 from app.documents.repository import save_document_field
 
 logger = logging.getLogger(__name__)
+base_rule = """
+1. PDF에서 추출된 텍스트를 분석한다.
+2. 오타 자동 수정
+3. 띄어쓰기 자동 수정
+4. 날짜 형식 통일
+
+YYYY-MM-DD HH:mm:SS
+YYYY-MM-DD
+YYYY-MM
+YYYY
+
+5. 없는 값은 null
+6. 추론 금지
+7. 중복 제거
+8. 모든 정보를 구조화
+9. 최대한 상세하게 추출."""
+
+# ponytail: 잘못된 프롬프트(문서 관련 없음, 텍스트 훼손 등) 감지 시 LLM이 탈출할 수 있도록 지정하는 공통 예외 규칙입니다.
+exception_rule = """
+[중요 - 부적절한 문서 필터링 규칙]
+1. 분석할 문서 본문이 비어있거나, 해당 구직 서류 종류와 전혀 무관한 텍스트(예: 상식 질문, 뉴스, 잡담, 코딩 등)인 경우 절대 데이터를 채우지 마십시오.
+2. 위와 같이 문서 생성 및 파싱 규칙에 위배되는 부적절한 요청/텍스트가 유입되면, 무조건 'InvalidRequestNotice' 구조를 선택하여 response_type을 'fail'로 지정하고 그 이유와 해결 방법을 반환해야 합니다.
+3. suggestion에는 doc_type을 참고하여 답하시오. """
 
 def extract_text_from_upload_file(file: UploadFile) -> str:
     """
@@ -55,39 +79,52 @@ def parse_individual_document(
 
     # ponytail: 4가지 문서 종류별로 전용 프롬프트 및 스키마 스펙을 최적화하여 1개만 와도 처리 가능하게 작성합니다.
     if doc_type == "resume":
-        target_schema = Resume
-        system_instruction = """
+        target_schema = ResumeRoute
+        system_instruction = f"""
 당신은 이력서(Resume)를 전문 분석하는 ATS 이력서 파서입니다.
-제공된 이력서 텍스트에서 학력 정보, 간단한 경력 사항, 자격증, 수상 경력, 교육 이수, 보유 기술 스택을 정확하게 추출하여 JSON 구조로 반환하십시오.
-오타와 띄어쓰기를 자동으로 적절하게 교정하며, 날짜 포맷은 YYYY-MM-DD, YYYY-MM, YYYY 중 하나로 통일하고 없는 값은 null 처리하십시오.
+doc_type: {doc_type}
+규칙
+{base_rule}
+{exception_rule}
 """
         mongo_field = "resume"
 
     elif doc_type == "cover_letter":
-        target_schema = CoverLetter
-        system_instruction = """
+        target_schema = CoverLetterRoute
+        system_instruction = f"""
 당신은 자기소개서(Cover Letter)를 전문 분석하는 ATS 자기소개서 파서입니다.
-제공된 자기소개서 텍스트에서 문단별 주제에 따라 카테고리(category), 제목(title), 내용(content)을 정확하게 분류하고 구분하여 리스트 형태로 반환하십시오.
-비정상적인 띄어쓰기와 맞춤법 오타를 자동으로 교정하고 없는 값은 null 처리하십시오.
+doc_type: {doc_type}
+
+규칙
+{base_rule}
+개별 규칙
+1. 자기소개서는 문단별 category/title/content 추출.
+{exception_rule}
 """
         mongo_field = "cover_letter"
 
     elif doc_type == "portfolio":
-        target_schema = Portfolio
-        system_instruction = """
+        target_schema = PortfolioRoute
+        system_instruction = f"""
 당신은 포트폴리오(Portfolio)를 분석하는 ATS 프로젝트 파서입니다.
-포트폴리오 파일에 나열된 모든 개별 프로젝트들을 분석하여 프로젝트명, 참여 인원, 기간, 사용 기술 스택, 담당 역할, 주요 기여 내용 및 상세 성과를 정확히 추출하여 projects 리스트 구조로 반환하십시오.
-날짜 형식을 통일하고, 임의의 지레짐작 및 과장 추론을 엄격히 금지합니다.
+doc_type: {doc_type}
+
+규칙
+{base_rule}
+{exception_rule}
 """
         # ponytail: 포트폴리오 분석 결과는 최종 데이터 모델 스펙에 맞게 'projects' 필드 키값으로 저장합니다.
         mongo_field = "projects"
 
     elif doc_type == "work_experience":
-        target_schema = WorkExperiences
-        system_instruction = """
+        target_schema = WorkExperiencesRoute
+        system_instruction = f"""
 당신은 상세 경력기술서(Work Experience)를 전문 분석하는 ATS 경력기술서 파서입니다.
-각 재직 기업별 부서명, 직책, 재직 기간, 주요 담당 업무 리스트, 그리고 참여 프로젝트 정보(수행 기간, 내용, 성과 포함)를 정밀 분석하여 리스트 구조로 반환하십시오.
-기본 이력서의 약식 경력 정보와 혼동하지 않도록 상세 내용들을 추출해 내야 합니다.
+doc_type: {doc_type}
+
+규칙
+{base_rule}
+{exception_rule}
 """
         mongo_field = "work_experience"
     else:
@@ -103,15 +140,41 @@ def parse_individual_document(
 
     logger.info(f"'{doc_type}' 문서 분석을 위해 OpenAI 호출을 진행합니다.")
     result = chain.invoke({"text": text})
+    
+    logger.info(f"'{doc_type}' 문서 분석을 위해 OpenAI 호출을 진행합니다.")
+    result = chain.invoke({"text": text})
+    
+    # ponytail: 새롭게 도입된 Route 스키마의 결과 데이터를 직접 꺼내어 검증합니다. (구조가 단순해져 result.output 대신 result 자체를 사용)
+    # result_dict 변환 작업 진행
     result_dict = result.model_dump(mode="json")
 
+    # [검증 및 분기] 잘못된 문서 양식이거나 부적절한 프롬프트 텍스트 유입으로 파싱에 실패한 경우
+    if result.response_type == "fail":
+        logger.error(f"'{doc_type}' 문서의 부적절한 요청이 감지되어 필터링되었습니다. 사유: {result.reason}")
+        return {
+            "success": False,
+            "error_message": result.reason,
+            "suggestion": result.suggestion
+        }
+
+    # [검증 및 분기] 문서 추출에 정상적으로 성공한 경우 하위 래퍼에서 핵심 순수 데이터만 가공
     # 스키마 Wrapper의 계층 구조를 단순화하여 데이터만 추출
-    if doc_type == "portfolio":
-        final_data = result_dict.get("projects") or []
+    if doc_type == "resume":
+        final_data = result_dict.get("resume") or {}
+    elif doc_type == "cover_letter":
+        final_data = result_dict.get("cover_letter") or {}
+    elif doc_type == "portfolio":
+        # portfolio_success 라우팅 래퍼 내부의 portfolio 스키마 객체에서 다시 projects 리스트를 추출합니다.
+        portfolio_obj = result_dict.get("portfolio") or {}
+        final_data = portfolio_obj.get("projects") or []
     elif doc_type == "work_experience":
-        final_data = result_dict.get("work_experience") or []
+        # work_experiences_success 라우팅 래퍼 내부의 work_experiences 스키마 객체에서 다시 work_experience 리스트를 추출합니다.
+        work_exp_obj = result_dict.get("work_experiences") or {}
+        final_data = work_exp_obj.get("work_experience") or []
     else:
         final_data = result_dict
+    final_data.update({"created_datetime": datetime.now().strftime('%Y-%m-%d %H:%M:%S')})
+
 
     # # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # # [개발 중 테스트 확인용 로컬 파일 저장 블록]
