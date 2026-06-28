@@ -337,7 +337,7 @@ def test_ws_answer_start_clears_typed_answer(monkeypatch):
 def test_ws_dummy_mode_streams_partial_transcript_per_chunk(monkeypatch):
     """더미 모드: 오디오 청크마다 부분 자막(isFinal=False)이 즉시 흐르고,
     answer_end 에 종료 마커(isFinal=True)가 온 뒤 평가가 스트리밍된다.
-    실 STT(whisper-1)는 호출되지 않는다(과금 0)."""
+    실 STT(gpt-4o-mini-transcribe)는 호출되지 않는다(과금 0)."""
     _patch_llm(monkeypatch, eval_deltas=['좋은 ', '답변'])
     monkeypatch.setattr(settings, 'interview_dummy_transcript', True)
 
