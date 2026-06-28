@@ -31,6 +31,9 @@ def build_engine() -> Engine | None:
         pool_pre_ping=True,   # 끊긴 커넥션 자동 감지 후 폐기
         pool_recycle=3600,    # MariaDB wait_timeout 전에 커넥션 재활용
         future=True,
+        # PyMySQL 드라이버 기준으로 연결 타임아웃을 3초로 강제 설정합니다.
+        # 이렇게 하면 무한 대기하지 않고 3초 뒤 정확한 원인 에러를 뿜어냅니다.
+        connect_args={"connect_timeout": 3} 
     )
 
 
