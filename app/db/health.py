@@ -27,15 +27,22 @@ def check_mariadb(engine: Engine | None) -> bool:
         logger.warning("MariaDB 헬스체크 실패: %s", exc)
         return False
 
-
-def check_mongodb(mongo_client: MongoClient | None) -> bool:
-    """MongoDB admin 'ping' 명령으로 연결을 확인한다."""
+def check_mongodb(mongo_client: MongoClient | None) -> tuple[bool, list[str]]:
+    """MongoDB 연결을 확인하고 모든 데이터베이스의 콜렉션 목록을 반환한다."""
     if mongo_client is None:
-        return False
-
+        return False, []
     try:
+        # 1. 핑 테스트로 연결 확인
         mongo_client.admin.command("ping")
-        return True
+
+        # 2. 모든 데이터베이스의 콜렉션 목록 조회
+        all_collections = []
+        for db_name in mongo_client.list_database_names():
+            db = mongo_client[db_name]
+            for coll_name in db.list_collection_names():
+                all_collections.append(f"{db_name}.{coll_name}")
+                
+        return True, all_collections
     except Exception as exc:  # noqa: BLE001 — 연결 실패 사유는 로그로만
         logger.warning("MongoDB 헬스체크 실패: %s", exc)
-        return False
+        return False, []
