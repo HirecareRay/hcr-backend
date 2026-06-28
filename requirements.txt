@@ -5,8 +5,10 @@ pydantic-settings
 
 # DB 연동
 sqlalchemy
-mariadb        # MariaDB 공식 드라이버
+pymysql        # MariaDB 드라이버 (report.py 의 mysql+pymysql URL 이 사용)
+mariadb        # MariaDB 공식 드라이버 (develop)
 pymongo        # MongoDB
+python-multipart  # 문서 업로드(Form/UploadFile) 처리
 
 # 인증 (회원가입·로그인)
 bcrypt            # 비밀번호 해시·검증
