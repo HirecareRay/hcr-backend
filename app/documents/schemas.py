@@ -111,7 +111,7 @@ class Project(StrictModel):
     description: Optional[str] = None
     content: Optional[str] = None
     result: Optional[str] = None
-    etc: Etc | None = None
+    etc: List[Etc] | None = None
 
 # 포트폴리오 파싱을 통해 추출할 프로젝트 목록 스키마
 class Portfolio(StrictModel):
@@ -135,6 +135,7 @@ class WorkExperience(StrictModel):
     responsibilities: List[str] = None
     projects: List[Project] = None
     reason_for_leaving: Optional[str] = None
+    etc: List[Etc] | None = None
 
 class WorkExperiences(StrictModel):
     """경력기술서 전체 파싱을 전담할 독립 스키마 Wrapper"""
