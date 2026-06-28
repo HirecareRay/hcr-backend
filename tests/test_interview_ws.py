@@ -331,6 +331,82 @@ def test_ws_answer_start_clears_typed_answer(monkeypatch):
     stt.transcribe_audio.assert_not_awaited()
 
 
+# ── 실시간 부분 자막 (interview_partial_transcript) ────────────────────
+
+
+def _enable_partial(monkeypatch, *, every: int, transcripts: list[str]) -> None:
+    """부분 자막 모드를 켜고, 누적 버퍼 재전사가 점점 길어지는 텍스트를 반환하게 한다."""
+    monkeypatch.setattr(settings, 'interview_partial_transcript', True)
+    monkeypatch.setattr(settings, 'interview_partial_transcript_every', every)
+    monkeypatch.setattr(stt, 'transcribe_audio', AsyncMock(side_effect=transcripts))
+
+
+def test_ws_partial_transcript_streams_while_answering(monkeypatch):
+    """부분 자막 모드: every 청크마다 부분 자막(isFinal=False)을 흘리고,
+    answer_end 에 최종 전사로 남은 꼬리만 final 로 보낸다."""
+    _patch_llm(monkeypatch, eval_deltas=['ok'])
+    _enable_partial(
+        monkeypatch, every=2, transcripts=['안녕하세요', '안녕하세요 반갑습니다']
+    )
+
+    with client.websocket_connect('/interviews/ws/s1') as ws:
+        ws.receive_json()  # 첫 질문
+        ws.send_json({'type': 'control', 'action': 'answer_start'})
+        ws.send_bytes(b'c1')
+        ws.send_bytes(b'c2')  # every=2 → 부분 전사 1회
+        partial = ws.receive_json()
+        ws.send_json({'type': 'control', 'action': 'answer_end'})
+        final = ws.receive_json()
+        ws.receive_json()  # eval
+
+    assert partial['type'] == 'transcript_delta'
+    assert partial['isFinal'] is False
+    assert partial['delta'] == '안녕하세요'
+    assert final['isFinal'] is True
+    assert final['delta'] == ' 반갑습니다'  # 이미 보낸 부분 뒤 꼬리만
+    assert stt.transcribe_audio.await_count == 2  # 부분 1 + 최종 1
+
+
+def test_ws_partial_transcript_final_close_marker_when_no_new_text(monkeypatch):
+    """최종 전사가 부분 자막과 같으면 새 꼬리가 없어 빈 종료 마커(delta='')를 보낸다."""
+    _patch_llm(monkeypatch, eval_deltas=['ok'])
+    _enable_partial(monkeypatch, every=2, transcripts=['안녕하세요', '안녕하세요'])
+
+    with client.websocket_connect('/interviews/ws/s1') as ws:
+        ws.receive_json()  # 첫 질문
+        ws.send_json({'type': 'control', 'action': 'answer_start'})
+        ws.send_bytes(b'c1')
+        ws.send_bytes(b'c2')
+        partial = ws.receive_json()
+        ws.send_json({'type': 'control', 'action': 'answer_end'})
+        final = ws.receive_json()
+        ws.receive_json()  # eval
+
+    assert partial['delta'] == '안녕하세요'
+    assert final['delta'] == ''  # 새 내용 없음 → 종료 마커
+    assert final['isFinal'] is True
+
+
+def test_ws_partial_below_threshold_skips_partial_but_finalizes(monkeypatch):
+    """청크가 간격(every)에 못 미치면 부분 자막 없이, answer_end 에 전체를 final 로 낸다."""
+    _patch_llm(monkeypatch, eval_deltas=['ok'])
+    _enable_partial(monkeypatch, every=5, transcripts=['전체 답변입니다'])
+
+    with client.websocket_connect('/interviews/ws/s1') as ws:
+        ws.receive_json()  # 첫 질문
+        ws.send_json({'type': 'control', 'action': 'answer_start'})
+        ws.send_bytes(b'c1')
+        ws.send_bytes(b'c2')  # every=5 미달 → 부분 자막 없음
+        ws.send_json({'type': 'control', 'action': 'answer_end'})
+        final = ws.receive_json()
+        ws.receive_json()  # eval
+
+    assert final['type'] == 'transcript_delta'
+    assert final['isFinal'] is True
+    assert final['delta'] == '전체 답변입니다'  # 부분이 없었으니 전체가 꼬리
+    assert stt.transcribe_audio.await_count == 1  # 최종 전사 1회만
+
+
 # ── 더미 자막 스트리밍 모드 (interview_dummy_transcript=True) ──────────
 
 
