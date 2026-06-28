@@ -52,6 +52,8 @@ tmp/
 .history/
 *.swp
 .DS_Store
+.env.bak
+*.bak
 Thumbs.db
 
 # ───── 개인용 Claude 지침 (팀 공유 안 함) ─────
