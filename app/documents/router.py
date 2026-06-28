@@ -74,6 +74,36 @@ async def parse_documents(
     }
 
 @router.get(
+    "/exists",
+    summary="사용자 문서 존재 여부 조회 API",
+)
+async def get_document_exists(
+    request: Request,
+    user_id: str = Depends(get_current_user_id),
+):
+    db = get_mongo_db(request)
+    # ponytail: projection으로 created_datetime만 추출, 문서 본문 로드 없음
+    doc = db.user_documents.find_one(
+        {"user_id": user_id},
+        {
+            "resume.created_datetime": 1,
+            "cover_letter.created_datetime": 1,
+            "projects.created_datetime": 1,
+            "work_experience.created_datetime": 1,
+            "_id": 0,
+        },
+    )
+    if not doc:
+        return {"resume": None, "cover_letter": None, "portfolio": None, "work_experience": None}
+    return {
+        "resume": (doc.get("resume") or {}).get("created_datetime"),
+        "cover_letter": (doc.get("cover_letter") or {}).get("created_datetime"),
+        "portfolio": (doc.get("projects") or {}).get("created_datetime"),
+        "work_experience": (doc.get("work_experience") or {}).get("created_datetime"),
+    }
+
+
+@router.get(
     "/read",
     summary="사용자 파싱 문서 조회 API",
     description="로그인한 사용자의 파싱된 문서 데이터를 조회합니다. doc_type이 주어지면 해당 문서 타입의 데이터만 반환하고, 없으면 전체 문서를 반환합니다.",
