@@ -39,3 +39,11 @@ def save_document_field(db: Database, user_id: str, field_name: str, field_data:
         logger.info(f"user_id: {user_id}의 '{field_name}' 필드에 새 데이터를 저장했습니다.")
         
     return user_id
+
+def delete_document_field(db: Database, user_id: str, field_name: str) -> bool:
+    collection = verify_and_get_collection(db)
+    result = collection.update_one(
+        {"user_id": user_id},
+        {"$unset": {field_name: ""}}
+    )
+    return result.matched_count > 0
