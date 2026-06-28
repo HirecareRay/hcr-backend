@@ -90,8 +90,20 @@ class EventSnapshotMessage(BaseModel):
     meta: dict[str, Any] = Field(default_factory=dict)
 
 
+class TextAnswerMessage(BaseModel):
+    """텍스트 모드 답변 (타이핑) — 음성 대신 직접 입력한 답변 본문.
+
+    answer_end 시 이 텍스트를 답변으로 사용한다(오디오 전사 대체).
+    """
+
+    type: Literal['text_answer'] = 'text_answer'
+    text: str
+
+
 UpstreamMessage = Annotated[
-    Union[ControlMessage, LandmarkFrameMessage, EventSnapshotMessage],
+    Union[
+        ControlMessage, LandmarkFrameMessage, EventSnapshotMessage, TextAnswerMessage
+    ],
     Field(discriminator='type'),
 ]
 """업스트림 JSON 메시지 union. audio_chunk(binary)는 제외 — 파일 상단 주석 참고."""
