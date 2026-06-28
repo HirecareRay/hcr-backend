@@ -54,6 +54,17 @@ class Settings(BaseSettings):
     # 에 누적 오디오를 gpt-4o-mini-transcribe 로 한 번에 전사하는 실 STT 경로를 쓴다.
     interview_dummy_transcript: bool = False
 
+    # 면접 실시간 부분 자막 — True 면 답변 중 누적 오디오를 일정 간격으로 재전사해
+    # 부분 자막(transcript_delta isFinal=False)을 흘려 '말하면서 자막이 차오르는'
+    # UX 를 만든다. False(기본)면 answer_end 에 한 번만 전사한다(배치).
+    # ⚠️ 비용: 켜면 누적 버퍼를 반복 전사하므로 OpenAI 호출이 늘어 과금이 커진다
+    # (강사님 키 주의). 더미 모드(interview_dummy_transcript)가 켜져 있으면 그쪽이
+    # 우선이라 이 설정은 무시된다.
+    interview_partial_transcript: bool = False
+    # 부분 자막 재전사 간격(오디오 청크 N개마다 1회). 작을수록 자막이 자주 갱신되지만
+    # 비용↑. 프론트 MediaRecorder timeslice 에 맞춰 튜닝한다. 1~50 으로 제한.
+    interview_partial_transcript_every: int = Field(8, ge=1, le=50)
+
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
 settings = Settings()

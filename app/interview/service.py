@@ -77,6 +77,61 @@ async def transcribe_answer(audio: bytes) -> TranscriptDeltaEvent | None:
     return TranscriptDeltaEvent(delta=text, is_final=True)
 
 
+def _suffix_delta(previous: str, full: str) -> str:
+    """이전에 흘려보낸 자막(previous) 뒤로 새로 늘어난 부분만 반환한다.
+
+    누적 버퍼를 통째로 재전사하면 매번 전체 텍스트가 나오므로, 이미 보낸
+    부분을 빼고 새 꼬리만 부분 자막으로 흘린다(프론트는 delta 를 이어 붙인다).
+    재전사로 앞부분이 바뀐 드문 경우엔 공통 접두 이후를 보낸다(약간의 글리치 허용).
+    """
+    if not previous:
+        return full
+    if full.startswith(previous):
+        return full[len(previous):]
+    common = 0
+    for prev_char, full_char in zip(previous, full):
+        if prev_char != full_char:
+            break
+        common += 1
+    return full[common:]
+
+
+async def transcribe_partial(
+    audio: bytes, previous: str
+) -> TranscriptDeltaEvent | None:
+    """누적 버퍼를 재전사해 이전 자막 뒤 새 부분만 부분 자막(isFinal=False)으로 만든다.
+
+    답변 중 주기적으로 호출된다. 전사 실패·새 내용 없음이면 None 을 돌려
+    라우터가 건너뛰게 한다 — 부분 전사 실패가 답변 진행을 막지 않는다(데모 보호).
+    """
+    try:
+        full = await stt.transcribe_audio(audio)
+    except RuntimeError as error:
+        logger.error('부분 전사 실패(건너뜀): %s', error)
+        return None
+    delta = _suffix_delta(previous, full)
+    return TranscriptDeltaEvent(delta=delta, is_final=False) if delta else None
+
+
+async def finalize_partial(
+    audio: bytes, previous: str
+) -> tuple[str, TranscriptDeltaEvent]:
+    """부분 자막 모드의 answer_end 마무리 — 최종 전사 후 (답변본문, 종료 자막)을 반환.
+
+    누적 버퍼를 한 번 더 전사해 권위 있는 전체 텍스트를 답변으로 쓰고, 이미 흘린
+    부분 자막 뒤 남은 꼬리만 final(isFinal=True) 로 보낸다. 전사 실패·빈 결과면
+    그동안 흘린 부분 자막(previous)을 답변으로 쓰고 종료 마커만 보낸다(끊김 방지).
+    """
+    try:
+        full = await stt.transcribe_audio(audio)
+    except RuntimeError as error:
+        logger.error('최종 전사 실패, 부분 자막을 답변으로 사용: %s', error)
+        full = ''
+    if not full:
+        return previous, TranscriptDeltaEvent(delta='', is_final=True)
+    return full, TranscriptDeltaEvent(delta=_suffix_delta(previous, full), is_final=True)
+
+
 def dummy_transcript_partial(index: int) -> TranscriptDeltaEvent:
     """더미 부분 자막 이벤트(isFinal=False) — 오디오 청크 1개당 토큰 1개.
 

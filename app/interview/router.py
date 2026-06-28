@@ -66,6 +66,9 @@ class _WsSession:
     # 텍스트 모드 답변(타이핑) — text_answer 로 받으면 채운다. answer_end 시 오디오
     # 전사 대신 이 텍스트를 답변으로 쓴다. answer_start/answer_end 마다 비운다.
     typed_answer: str | None = None
+    # 부분 자막 모드에서 지금까지 흘려보낸 자막 누적 텍스트. 누적 버퍼 재전사 결과에서
+    # 이미 보낸 부분을 빼고 새 꼬리만 보내기 위한 기준. answer_start/answer_end 마다 비운다.
+    partial_text: str = ''
     history: tuple[service.Turn, ...] = ()
     # 비언어 신호는 audio_chunks 와 달리 저빈도(landmark ~1s, event 발생 시)라
     # 가변 list 대신 불변 tuple + replace 로 누적해 불변 패턴을 지킨다.
@@ -102,7 +105,8 @@ async def interview_ws(websocket: WebSocket, session_id: str) -> None:
             # 바이너리(audio_chunk)는 JSON 스키마가 없는 답변 오디오.
             #  - 더미 모드: 오디오는 쓰지 않으므로 버퍼링하지 않고, 청크마다 부분
             #    자막만 흘려 자막이 흐르게 한다(OpenAI 호출 0, 불필요한 메모리 적재 0).
-            #  - 실 모드: answer_end 에 통전사하기 위해 누적만 한다.
+            #  - 실 모드: answer_end 에 통전사하기 위해 누적한다. 부분 자막 모드면
+            #    누적 중 일정 간격으로 재전사해 부분 자막을 흘린다.
             audio = raw.get('bytes')
             if audio is not None:
                 if settings.interview_dummy_transcript:
@@ -114,7 +118,7 @@ async def interview_ws(websocket: WebSocket, session_id: str) -> None:
                         session, transcript_sent=session.transcript_sent + 1
                     )
                 else:
-                    session.audio_chunks.append(audio)
+                    session = await _accumulate_audio(websocket, session, audio)
                 continue
 
             text = raw.get('text')
@@ -129,6 +133,28 @@ async def interview_ws(websocket: WebSocket, session_id: str) -> None:
             session = await _handle_message(websocket, message, session)
     except WebSocketDisconnect:
         logger.info('면접 WS 종료: session=%s', session_id)
+
+
+async def _accumulate_audio(
+    websocket: WebSocket, session: _WsSession, audio: bytes
+) -> _WsSession:
+    """답변 오디오를 누적하고, 부분 자막 모드면 일정 간격으로 재전사해 자막을 흘린다.
+
+    부분 자막이 꺼져 있으면 누적만 한다(기존 배치 동작). 켜져 있으면 청크가
+    설정 간격(every)에 닿을 때마다 누적 버퍼를 재전사해 새 꼬리만 부분 자막으로
+    보낸다 — 전사 실패·새 내용 없음이면 조용히 건너뛴다(답변 진행을 막지 않음).
+    """
+    session.audio_chunks.append(audio)
+    if not settings.interview_partial_transcript:
+        return session
+    if len(session.audio_chunks) % settings.interview_partial_transcript_every != 0:
+        return session
+    buffer = b''.join(session.audio_chunks)
+    event = await service.transcribe_partial(buffer, session.partial_text)
+    if event is None:
+        return session
+    await _send(websocket, event)
+    return replace(session, partial_text=session.partial_text + event.delta)
 
 
 async def _handle_message(
@@ -150,9 +176,13 @@ async def _handle_message(
         return session
 
     if message.action is ControlAction.ANSWER_START:
-        # 새 답변 시작 — 이전 답변의 누적 오디오·자막 토큰 순번·타이핑 답변을 비운다
+        # 새 답변 시작 — 이전 답변의 누적 오디오·자막 순번·타이핑 답변·부분 자막을 비운다
         return replace(
-            session, audio_chunks=[], transcript_sent=0, typed_answer=None
+            session,
+            audio_chunks=[],
+            transcript_sent=0,
+            typed_answer=None,
+            partial_text='',
         )
 
     if message.action is ControlAction.ANSWER_END:
@@ -185,6 +215,7 @@ async def _finish_answer(websocket: WebSocket, session: _WsSession) -> _WsSessio
         audio_chunks=[],
         transcript_sent=0,
         typed_answer=None,
+        partial_text='',
         history=session.history + (turn,),
     )
 
@@ -215,10 +246,18 @@ async def _finalize_dummy(websocket: WebSocket, session: _WsSession) -> str:
 
 
 async def _transcribe(websocket: WebSocket, session: _WsSession) -> str:
-    """누적 오디오를 전사해 자막을 송신하고 답변 텍스트를 반환한다(빈 답변은 '')."""
+    """누적 오디오를 전사해 자막을 송신하고 답변 텍스트를 반환한다(빈 답변은 '').
+
+    부분 자막 모드면 최종 전사로 남은 꼬리만 final 자막을 보내고 전체를 답변으로
+    쓴다. 아니면(배치) answer_end 에 통전사해 전체 자막(final)을 한 번에 보낸다.
+    """
     audio = b''.join(session.audio_chunks)
     if not audio:
         return ''
+    if settings.interview_partial_transcript:
+        answer, event = await service.finalize_partial(audio, session.partial_text)
+        await _send(websocket, event)
+        return answer
     try:
         transcript = await service.transcribe_answer(audio)
     except RuntimeError as error:
