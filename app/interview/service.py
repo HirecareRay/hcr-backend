@@ -90,6 +90,15 @@ def transcript_final() -> TranscriptDeltaEvent:
     return TranscriptDeltaEvent(delta='', is_final=True)
 
 
+def text_answer_transcript(text: str) -> TranscriptDeltaEvent:
+    """타이핑 답변을 최종 자막으로 감싼다.
+
+    평가·요약 입력(답변 본문)과 화면 자막의 출처를 하나로 맞춘다 — 텍스트 모드도
+    음성 모드와 동일하게 자막(final)이 흐른 뒤 평가가 스트리밍되게 한다.
+    """
+    return TranscriptDeltaEvent(delta=text, is_final=True)
+
+
 def dummy_answer_text(chunk_count: int) -> str:
     """흘린 더미 토큰을 합친 답변 본문(평가·요약 입력). 청크 0 이면 빈 답변."""
     return dummy_transcript.answer_text(chunk_count)
