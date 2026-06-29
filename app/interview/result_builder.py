@@ -122,41 +122,50 @@ def _improvements(data: object) -> list[ImprovementItem]:
 
 
 def _script(history: tuple[Turn, ...], data: object) -> list[ScriptItem]:
-    """턴 히스토리(질문·답변·분류)와 LLM 평가를 no 기준으로 매핑한다.
+    """턴 히스토리(질문·답변)와 LLM 평가·분류를 no 기준으로 매핑한다.
 
-    질답 사실(question·answer·category)은 우리 히스토리가 권위다. 평가(score·good·
-    improve)는 LLM report.script 에서 no 로 찾아 붙이고, 없으면 안전 기본값으로 둔다.
+    질답 사실(question·answer)은 우리 히스토리가 권위다. 평가(score·good·improve)와
+    분류(category)는 LLM report.script 에서 no 로 찾아 붙인다 — LLM 이 질문 텍스트를
+    보고 회사/직무/공통을 분류한다(후분류). category 가 없으면 turn.category(기본
+    common)로, 평가가 없으면 안전 기본값으로 둔다.
     """
-    evals = _script_evals_by_no(data)
+    by_no = _script_by_no(data)
     items: list[ScriptItem] = []
     for index, turn in enumerate(history, start=1):
+        raw = by_no.get(index, {})
         items.append(
             ScriptItem(
                 no=index,
-                category=_category(turn.category),
+                category=_category(_str(raw.get('category')) or turn.category),
                 question=turn.question,
                 answer=turn.answer,
-                evaluation=evals.get(index, _empty_eval()),
+                evaluation=_eval(raw),
             )
         )
     return items
 
 
-def _script_evals_by_no(data: object) -> dict[int, ScriptEvaluation]:
-    """report.script 를 {no: ScriptEvaluation} 으로 안전 파싱한다."""
-    result: dict[int, ScriptEvaluation] = {}
+def _script_by_no(data: object) -> dict[int, dict]:
+    """report.script 를 {no: raw_dict} 로 안전 파싱한다(no 없는 항목은 버린다)."""
+    result: dict[int, dict] = {}
     for raw in _as_list(data):
         if not isinstance(raw, dict):
             continue
         no = _to_int(raw.get('no'))
-        if no is None:
-            continue
-        result[no] = ScriptEvaluation(
-            score=_clamp_int(raw.get('score')),
-            good=_str(raw.get('good')),
-            improve=_str(raw.get('improve')),
-        )
+        if no is not None:
+            result[no] = raw
     return result
+
+
+def _eval(raw: dict) -> ScriptEvaluation:
+    """report.script 한 항목의 평가를 파싱한다(비면 안전 기본값)."""
+    if not raw:
+        return _empty_eval()
+    return ScriptEvaluation(
+        score=_clamp_int(raw.get('score')),
+        good=_str(raw.get('good')),
+        improve=_str(raw.get('improve')) or '평가를 생성하지 못했습니다.',
+    )
 
 
 def _empty_eval() -> ScriptEvaluation:
