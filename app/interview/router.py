@@ -28,7 +28,7 @@ from pymongo.database import Database
 from app.auth.security import decode_access_token
 from app.core.config import settings
 from app.db.mongo import get_mongo_db
-from app.interview import nonverbal, result_service, service, ws_ticket
+from app.interview import nonverbal, result_service, service, voice, ws_ticket
 from app.interview.result_schemas import InterviewResult
 from app.interview.schemas import (
     ControlAction,
@@ -37,6 +37,7 @@ from app.interview.schemas import (
     LandmarkFrameMessage,
     TextAnswerMessage,
     UpstreamMessage,
+    VoiceMetricMessage,
     WsTicketOut,
 )
 
@@ -60,6 +61,7 @@ _ticket_auth_error = HTTPException(
 # tuple 복사 비용(특히 event_snapshot 의 base64 image)을 막는 방어선이다.
 _MAX_LANDMARKS = 1200  # ~20분 @ 1s
 _MAX_EVENTS = 500
+_MAX_VOICE = 1200  # ~20분 @ 1s (landmark 와 동일 주기)
 # 타이핑 답변(text_answer) 한 건의 최대 길이. 면접 답변은 길어야 수천 자라 넉넉하다.
 # 답변은 평가 1회 + 요약(매 턴 누적)으로 LLM 에 들어가므로, 거대한 붙여넣기로
 # 빌린 OpenAI 키 토큰을 증폭시키지 못하게 자른다(버리지 않고 앞부분만 — 면접 안 끊김).
@@ -105,6 +107,8 @@ class _WsSession:
     # 가변 list 대신 불변 tuple + replace 로 누적해 불변 패턴을 지킨다.
     landmarks: tuple[LandmarkFrameMessage, ...] = ()
     events: tuple[EventSnapshotMessage, ...] = ()
+    # 음성 물리지표(voice_metric) — landmark 와 동일하게 저빈도 누적, 요약 시 집계.
+    voice_metrics: tuple[VoiceMetricMessage, ...] = ()
 
 
 async def _send(websocket: WebSocket, event: BaseModel) -> None:
@@ -350,6 +354,10 @@ async def _handle_message(
     if isinstance(message, EventSnapshotMessage):
         events = (session.events + (message,))[-_MAX_EVENTS:]
         return replace(session, events=events)
+    # 음성 물리지표도 다운스트림 응답 없이 누적만 한다(요약 시 발화 안정도로 환산).
+    if isinstance(message, VoiceMetricMessage):
+        voice_metrics = (session.voice_metrics + (message,))[-_MAX_VOICE:]
+        return replace(session, voice_metrics=voice_metrics)
     # 텍스트 모드 답변 — 다운스트림 응답 없이 세션에 저장만 한다(answer_end 에서 사용).
     # 토큰 비용 남용 방지로 상한까지만 저장한다(초과분은 잘라냄, 정상 답변은 안 걸림).
     if isinstance(message, TextAnswerMessage):
@@ -499,6 +507,7 @@ async def _next_main_or_summary(
     await result_service.persist_result(
         history=session.history,
         metrics=metrics,
+        voice_metrics=voice.aggregate(session.voice_metrics),
         user_id=session.user_id,
         company_id=session.company_id,
         job_title=session.job_title,

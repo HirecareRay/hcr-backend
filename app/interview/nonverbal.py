@@ -15,7 +15,11 @@ from collections import Counter
 from dataclasses import dataclass, field
 from statistics import pstdev
 
+from app.interview.result_schemas import FeedbackMetric, ModalFeedback
 from app.interview.schemas import EventSnapshotMessage, LandmarkFrameMessage
+
+# 결과 표정 모달에서 이벤트 1건당 깎는 '주의 집중' 점수(0 하한).
+_EVENT_ATTENTION_PENALTY = 5
 
 # 시선이 화면 중앙에서 이 값을 넘게 벗어나면 "이탈"로 본다(정규화 좌표, 0=중앙).
 GAZE_OFF_THRESHOLD = 0.3
@@ -133,3 +137,72 @@ def _expression_dist(frames: tuple[LandmarkFrameMessage, ...]) -> dict[str, floa
         return {}
     total = len(labels)
     return {label: count / total for label, count in Counter(labels).items()}
+
+
+# ── 결과 표정 모달 환산 (계약 ④ feedback.expression) ────────────────
+
+
+def to_modal_feedback(metrics: NonverbalMetrics) -> ModalFeedback | None:
+    """집계 지표를 결과 페이지의 표정 ModalFeedback 으로 환산한다(데이터 없으면 None).
+
+    점수화는 객관적 물리지표(시선 이탈률·고개 흔들림·주의 이벤트)만 한다 — 표정 라벨의
+    의미(긍정/부정)는 클라이언트 MediaPipe 정의에 달려 있어 임의 점수화하지 않고, 분포는
+    summary 문장(describe)에만 녹인다(가짜 점수를 만들지 않는다). 데이터가 없으면 None 을
+    돌려 호출부(result_builder)가 빈 모달로 정직하게 비우게 한다.
+    """
+    if not metrics.has_data:
+        return None
+    gaze_score = _ratio_to_score(metrics.gaze_off_ratio)
+    posture_score = _ratio_to_score(min(metrics.head_movement, 1.0))
+    feedback_metrics = [
+        FeedbackMetric(
+            label='시선 처리',
+            score=gaze_score,
+            value=f'이탈 {metrics.gaze_off_ratio:.0%}',
+            comment=_score_comment(gaze_score, '시선'),
+        ),
+        FeedbackMetric(
+            label='자세 안정성',
+            score=posture_score,
+            value=_posture_value(metrics.head_movement),
+            comment=_score_comment(posture_score, '자세'),
+        ),
+    ]
+    scores = [gaze_score, posture_score]
+    event_total = sum(metrics.event_counts.values())
+    if event_total:
+        attention = max(0, 100 - event_total * _EVENT_ATTENTION_PENALTY)
+        feedback_metrics.append(
+            FeedbackMetric(
+                label='주의 집중',
+                score=attention,
+                value=f'주의 이벤트 {event_total}회',
+                comment='시선이탈·무표정 등 주의 이벤트가 감지됐습니다.',
+            )
+        )
+        scores.append(attention)
+    overall = round(sum(scores) / len(scores))
+    return ModalFeedback(score=overall, summary=describe(metrics), metrics=feedback_metrics)
+
+
+def _ratio_to_score(ratio: float) -> int:
+    """이탈/흔들림 비율(0~1, 낮을수록 좋음)을 0~100 점수로 뒤집어 환산한다."""
+    return max(0, min(round((1.0 - ratio) * 100), 100))
+
+
+def _posture_value(head_movement: float) -> str:
+    """고개 흔들림(0~1)을 사람이 읽는 안정도 라벨로."""
+    if head_movement < 0.3:
+        return '안정'
+    if head_movement < 0.6:
+        return '보통'
+    return '흔들림'
+
+
+def _score_comment(score: int, subject: str) -> str:
+    """점수대별 한 줄 코멘트(시선·자세 공용)."""
+    if score >= 80:
+        return f'{subject}이(가) 안정적이었습니다.'
+    if score >= 60:
+        return f'{subject}이(가) 다소 흔들렸습니다. 조금 더 안정적으로.'
+    return f'{subject} 안정성이 낮았습니다. 의식적으로 가다듬어 보세요.'
