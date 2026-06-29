@@ -102,6 +102,30 @@ async def generate_summary(transcript: str) -> dict:
     return _parse_summary(text)
 
 
+async def generate_report(transcript: str, job_title: str) -> dict:
+    """면접 기록으로 결과 리포트의 LLM 영역(JSON)을 1회 생성·파싱한다(실패 시 빈 dict).
+
+    결과 페이지(계약 ④)에 필요한 종합 점수·답변 피드백·강약점·보완점·턴별 평가·
+    추천 질문을 한 호출로 만든다. response_format=json_object 로 JSON 출력을 강제해
+    파싱 안정성을 높인다(코드펜스·잡설 방지). 호출부(result_builder)가 빈 dict 를
+    안전 기본값으로 우회하므로, 여기서는 파싱 실패도 빈 dict 로 흡수한다.
+    """
+    try:
+        resp = await _get_client().chat.completions.create(
+            model=_CHAT_MODEL,
+            messages=cast(
+                list[ChatCompletionMessageParam],
+                prompts.report_messages(transcript, job_title),
+            ),
+            response_format={'type': 'json_object'},
+        )
+        text = resp.choices[0].message.content or ''
+    except Exception as error:  # noqa: BLE001 - 외부 API 장애를 친화 메시지로 변환
+        logger.error('리포트 생성 실패: %s', error)
+        raise RuntimeError('면접 결과 리포트 생성에 실패했습니다') from error
+    return _parse_summary(text)
+
+
 def _parse_summary(text: str) -> dict:
     """LLM 의 JSON 응답을 안전하게 파싱한다(코드펜스 허용, 실패 시 빈 dict).
 
