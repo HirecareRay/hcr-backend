@@ -28,6 +28,7 @@ from app.interview.schemas import (
     ControlMessage,
     EventSnapshotMessage,
     LandmarkFrameMessage,
+    TextAnswerMessage,
     UpstreamMessage,
 )
 
@@ -62,6 +63,9 @@ class _WsSession:
     # 더미 자막 모드에서 현재 답변에 흘린 부분 자막(=오디오 청크) 개수.
     # answer_start·answer_end 마다 0 으로 리셋해 답변별로 토큰 순번을 새로 센다.
     transcript_sent: int = 0
+    # 텍스트 모드 답변(타이핑) — text_answer 로 받으면 채운다. answer_end 시 오디오
+    # 전사 대신 이 텍스트를 답변으로 쓴다. answer_start/answer_end 마다 비운다.
+    typed_answer: str | None = None
     history: tuple[service.Turn, ...] = ()
     # 비언어 신호는 audio_chunks 와 달리 저빈도(landmark ~1s, event 발생 시)라
     # 가변 list 대신 불변 tuple + replace 로 누적해 불변 패턴을 지킨다.
@@ -139,12 +143,17 @@ async def _handle_message(
     if isinstance(message, EventSnapshotMessage):
         events = (session.events + (message,))[-_MAX_EVENTS:]
         return replace(session, events=events)
+    # 텍스트 모드 답변 — 다운스트림 응답 없이 세션에 저장만 한다(answer_end 에서 사용).
+    if isinstance(message, TextAnswerMessage):
+        return replace(session, typed_answer=message.text)
     if not isinstance(message, ControlMessage):
         return session
 
     if message.action is ControlAction.ANSWER_START:
-        # 새 답변 시작 — 이전 답변의 누적 오디오·자막 토큰 순번을 비운다
-        return replace(session, audio_chunks=[], transcript_sent=0)
+        # 새 답변 시작 — 이전 답변의 누적 오디오·자막 토큰 순번·타이핑 답변을 비운다
+        return replace(
+            session, audio_chunks=[], transcript_sent=0, typed_answer=None
+        )
 
     if message.action is ControlAction.ANSWER_END:
         return await _finish_answer(websocket, session)
@@ -175,6 +184,7 @@ async def _finish_answer(websocket: WebSocket, session: _WsSession) -> _WsSessio
         session,
         audio_chunks=[],
         transcript_sent=0,
+        typed_answer=None,
         history=session.history + (turn,),
     )
 
@@ -182,8 +192,12 @@ async def _finish_answer(websocket: WebSocket, session: _WsSession) -> _WsSessio
 async def _resolve_answer(websocket: WebSocket, session: _WsSession) -> str:
     """모드에 맞게 답변 텍스트를 얻으며 자막을 마무리한다(빈 답변은 '').
 
-    더미 모드는 종료 마커(isFinal=True)를, 실 모드는 통전사 자막(isFinal=True)을 보낸다.
+    타이핑 답변(text_answer)이 있으면 전사 없이 그 텍스트를 답변으로 쓰고 자막(final)을
+    보낸다. 없으면 더미 모드는 종료 마커를, 실 모드는 통전사 자막을 보낸다(둘 다 isFinal=True).
     """
+    if session.typed_answer:
+        await _send(websocket, service.text_answer_transcript(session.typed_answer))
+        return session.typed_answer
     if settings.interview_dummy_transcript:
         return await _finalize_dummy(websocket, session)
     return await _transcribe(websocket, session)
