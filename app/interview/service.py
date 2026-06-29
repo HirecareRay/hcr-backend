@@ -38,11 +38,28 @@ class Turn:
     evaluation: str
 
 
-async def build_main_questions(count: int) -> list[str]:
-    """회사 컨텍스트로 메인 질문을 생성한다(LLM 실패·개수 부족 시 기본 질문으로 보충)."""
-    company_context = await context.get_company_context()
+async def build_main_questions(
+    count: int,
+    *,
+    company_id: str | None = None,
+    user_id: str | None = None,
+    db: object | None = None,
+    mongo: object | None = None,
+) -> list[str]:
+    """회사·지원자 컨텍스트로 메인 질문을 생성한다(LLM 실패·개수 부족 시 기본 질문 보충).
+
+    company_id·db·mongo 가 주어지면 실제 회사 분석을, user_id·mongo 가 주어지면
+    지원자 이력서·포트폴리오를 컨텍스트에 합쳐 개인화 질문을 만든다. 식별자가 없거나
+    조회에 실패하면 mock 회사 컨텍스트·빈 지원자 정보로 우회한다(데모·테스트 보호).
+    """
+    company_context = await context.get_company_context(
+        db=db, mongo=mongo, company_id=company_id
+    )
+    user_context = await context.get_user_context(mongo=mongo, user_id=user_id)
     try:
-        questions = await llm.generate_main_questions(company_context, count)
+        questions = await llm.generate_main_questions(
+            company_context, user_context, count
+        )
     except RuntimeError as error:
         logger.error('메인 질문 생성 실패, 기본 질문 사용: %s', error)
         questions = []
