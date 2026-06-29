@@ -52,7 +52,7 @@ def test_main_questions_splits_lines_and_limits_count(monkeypatch):
     )
     monkeypatch.setattr(llm, '_get_client', lambda: _fake_chat_client(create))
 
-    questions = asyncio.run(llm.generate_main_questions('회사 컨텍스트', '', 3))
+    questions = asyncio.run(llm.generate_main_questions('회사 컨텍스트', '', '', 3))
 
     assert questions == ['자기소개 부탁드립니다', '지원 동기는?', '강점은?']
     assert create.await_args.kwargs['model'] == 'gpt-4o-mini'  # 저가 모델 고정
@@ -65,7 +65,7 @@ def test_main_questions_dedupes_preserving_order(monkeypatch):
     )
     monkeypatch.setattr(llm, '_get_client', lambda: _fake_chat_client(create))
 
-    questions = asyncio.run(llm.generate_main_questions('회사 컨텍스트', '', 4))
+    questions = asyncio.run(llm.generate_main_questions('회사 컨텍스트', '', '', 4))
 
     assert questions == ['자기소개 부탁드립니다', '지원 동기는?']
 
@@ -76,7 +76,7 @@ def test_main_questions_api_error_raises_friendly(monkeypatch):
     monkeypatch.setattr(llm, '_get_client', lambda: _fake_chat_client(create))
 
     with pytest.raises(RuntimeError, match='면접'):
-        asyncio.run(llm.generate_main_questions('ctx', '', 4))
+        asyncio.run(llm.generate_main_questions('ctx', '', '', 4))
 
 
 # ── generate_follow_up ────────────────────────────────────────────
