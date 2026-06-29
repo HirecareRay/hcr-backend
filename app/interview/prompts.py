@@ -88,3 +88,46 @@ def summary_messages(transcript: str) -> list[dict[str, str]]:
         {'role': 'system', 'content': system},
         {'role': 'user', 'content': f'면접 기록:\n{transcript}'},
     ]
+
+
+def report_messages(transcript: str, job_title: str) -> list[dict[str, str]]:
+    """면접 전체 기록으로 결과 리포트의 LLM 영역을 한 JSON 으로 생성하는 메시지.
+
+    요약(summary_messages)과 달리, 결과 페이지(계약 ④)에 필요한 풍부한 산출물을
+    1회 호출로 모두 만든다 — 종합 점수·답변 피드백·강약점·보완점·턴별 평가·추천 질문.
+    응답은 JSON 한 덩어리만(키는 내부 표기 snake_case). 점수는 모두 0~100 정수.
+
+    script 평가는 면접 기록의 각 턴 번호(no, 1부터)에 1:1 대응시킨다 — no 는 기록에
+    나온 질문 순서다. 추천 질문은 기록에 드러난 회사·직무 맥락에 근거해 생성한다.
+    """
+    job_line = f'지원 직무: {job_title}\n' if job_title else ''
+    system = (
+        '당신은 면접관입니다. 아래 면접 전체 기록을 보고 지원자 평가 리포트를 '
+        'JSON 으로만 출력하세요. 모든 점수는 0~100 사이 정수입니다. '
+        '키와 형식은 정확히 다음을 따릅니다:\n'
+        '{\n'
+        '  "overall": {"score": 정수, "grade": "A/B+/B 같은 등급 라벨", '
+        '"headline": "한 줄 총평"},\n'
+        '  "answer_feedback": {"score": 정수, "summary": "답변 영역 총평", '
+        '"metrics": [{"label": "논리 구조", "score": 정수, "value": "우수/보통 같은 짧은 평", '
+        '"comment": "한 줄 코멘트"}]},\n'
+        '  "strengths": ["강점 문장", ...],\n'
+        '  "weaknesses": ["약점 문장", ...],\n'
+        '  "improvements": [{"area": "보완 영역", "problem": "무엇이 부족했나", '
+        '"method": "구체적 보완 방법"}],\n'
+        '  "script": [{"no": 정수, "score": 정수, "good": "잘한 점", "improve": "개선점"}],\n'
+        '  "recommended_questions": {"company": ["회사 관련 예상 질문", ...], '
+        '"job": ["직무 관련 예상 질문", ...]}\n'
+        '}\n'
+        '규칙:\n'
+        '- answer_feedback.metrics 는 논리 구조·구체성·직무 적합성·질문 이해도 등 '
+        '4개 내외로 채웁니다.\n'
+        '- script 는 면접 기록의 각 턴(no=질문 순서, 1부터)마다 하나씩 만듭니다.\n'
+        '- strengths·weaknesses 는 각 2~4개, improvements 는 2~3개, '
+        'recommended_questions 의 company·job 은 각 3~4개로 만듭니다.\n'
+        '- JSON 외의 어떤 텍스트도 출력하지 마세요.'
+    )
+    return [
+        {'role': 'system', 'content': system},
+        {'role': 'user', 'content': f'{job_line}면접 기록:\n{transcript}'},
+    ]
