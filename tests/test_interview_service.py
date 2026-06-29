@@ -25,6 +25,40 @@ def test_build_main_questions_uses_llm_result(monkeypatch):
     assert questions == ['자기소개?', '동기?']
 
 
+def test_build_main_questions_passes_company_and_user_context_to_llm(monkeypatch):
+    """식별자가 주어지면 회사·지원자 컨텍스트를 조회해 LLM 에 함께 넘긴다."""
+    captured: dict = {}
+
+    async def _fake_company(db, mongo, company_id):
+        captured['company_id'] = company_id
+        return '회사명: CJ ENM'
+
+    async def _fake_user(mongo, user_id):
+        captured['user_id'] = user_id
+        return '[이력서]\n보유 기술: Python'
+
+    async def _fake_generate(company_context, user_context, count):
+        captured['company_context'] = company_context
+        captured['user_context'] = user_context
+        return ['자기소개?', '파이썬 경험은?']
+
+    monkeypatch.setattr(context, 'get_company_context', _fake_company)
+    monkeypatch.setattr(context, 'get_user_context', _fake_user)
+    monkeypatch.setattr(llm, 'generate_main_questions', _fake_generate)
+
+    questions = asyncio.run(
+        service.build_main_questions(
+            2, company_id='c1', user_id='u1', db=object(), mongo=object()
+        )
+    )
+
+    assert questions == ['자기소개?', '파이썬 경험은?']
+    assert captured['company_id'] == 'c1'
+    assert captured['user_id'] == 'u1'
+    assert captured['company_context'] == '회사명: CJ ENM'
+    assert captured['user_context'] == '[이력서]\n보유 기술: Python'
+
+
 def test_build_main_questions_falls_back_on_error(monkeypatch):
     """LLM 장애 시 안전 기본 질문으로 우회한다(면접 안 끊김)."""
     monkeypatch.setattr(
