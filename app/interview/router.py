@@ -135,19 +135,17 @@ def _open_db_session(websocket: WebSocket):
     return factory() if factory is not None else None
 
 
-async def _build_questions(websocket: WebSocket) -> list[str]:
-    """접속 쿼리(companyId·ticket)와 DB 로 개인화 메인 질문을 생성한다.
+async def _build_questions(websocket: WebSocket, user_id: str) -> list[str]:
+    """접속 쿼리(companyId)와 user_id·DB 로 개인화 메인 질문을 생성한다.
 
-    user_id 는 1회용 입장 티켓(?ticket=...)을 소비해 얻는다 — 브라우저 WS 는 헤더를
-    못 붙이고 JWT 노출도 피하려 토큰 대신 단기 티켓을 받는다. 티켓이 없거나 무효·
-    만료면 None(익명)으로 우회해 개인화만 생략하고 면접은 그대로 진행한다.
+    user_id 는 핸들러가 입장 티켓을 소비해 확정한 값이다(여기로 주입된다). companyId
+    는 선택 — 없으면 회사 컨텍스트 주입만 생략한다.
 
     MariaDB 세션은 질문 생성 동안만 열고 곧장 닫는다 — 면접 루프는 DB 가 필요 없어
     긴 세션 내내 풀 커넥션을 점유하지 않게 한다. MongoDB 핸들은 앱 수명이 관리한다.
     """
     params = websocket.query_params
     company_id = params.get('companyId') or params.get('company_id')
-    user_id = ws_ticket.consume_ticket(params.get('ticket'))
     mongo = _get_mongo_db(websocket)
     db = _open_db_session(websocket)
     try:
@@ -167,13 +165,20 @@ async def _build_questions(websocket: WebSocket) -> list[str]:
 async def interview_ws(websocket: WebSocket, session_id: str) -> None:
     """실시간 면접 WS.
 
-    접속 시 회사 분석·지원자 이력서 컨텍스트로 메인 질문을 생성해 첫 질문을 보낸 뒤,
-    업스트림 프레임을 분기 처리한다(binary=답변 오디오 누적, text=control/landmark/event).
-    회사·지원자 식별자는 접속 쿼리(``?companyId=...&ticket=<티켓>``)로 받는다 —
-    티켓은 POST /interviews/ws-ticket 으로 미리 발급받은 1회용 입장권이다.
+    접속 직후 입장 티켓(?ticket=...)을 1회 소비해 user_id 를 확정한다. 티켓이 없거나
+    무효·만료·재사용이면 정책 위반(1008)으로 연결을 거절한다 — 면접은 로그인 사용자
+    전용이고, 빌린 OpenAI 키 비용 남용을 막는 실질 경계는 프론트 가드가 아니라 여기다.
+    인증을 통과하면 회사 분석·지원자 이력서 컨텍스트로 메인 질문을 생성해 첫 질문을
+    보낸 뒤, 업스트림 프레임을 분기 처리한다(binary=답변 오디오 누적, text=control/
+    landmark/event). 티켓은 POST /interviews/ws-ticket 으로 미리 발급받는다.
     """
+    user_id = ws_ticket.consume_ticket(websocket.query_params.get('ticket'))
+    if user_id is None:
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+
     await websocket.accept()
-    questions = await _build_questions(websocket)
+    questions = await _build_questions(websocket, user_id)
     first = questions[0]
     session = _WsSession(main_questions=tuple(questions), current_question=first)
     await _send(websocket, service.question_event('m0', first))
