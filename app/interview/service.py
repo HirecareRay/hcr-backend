@@ -33,8 +33,11 @@ _SCORE_MAX = 100.0
 class Turn:
     """한 번의 질문-답변-평가 기록. 꼬리질문·요약·결과 스크립트의 입력이 된다.
 
-    category 는 질문 분류(company/job/common) — 결과 스크립트(ScriptItem.category)에
-    매핑된다. 메인 질문 생성 시 태깅하고 꼬리질문은 부모 분류를 상속한다(기본 common).
+    category 는 결과 스크립트(ScriptItem.category)용 분류 폴백값이다. WS 진행 경로는
+    질문의 분류를 모르므로 기본 'common' 으로 둔다 — 실제 company/job/common 분류는
+    결과 조립 시 LLM 이 질문 텍스트를 보고 후분류한다(result_builder 가 LLM 분류를
+    우선 적용하고, 없으면 이 값으로 폴백). 추후 메인 질문 생성 시 태깅을 붙이면 그
+    값이 폴백으로 쓰인다.
     """
 
     question: str
@@ -232,7 +235,7 @@ async def build_summary(
     LLM 요약 실패 시 안전 기본 요약으로 우회하고, 비언어 지표가 없으면(metrics
     None·빈 집계) 언어 평가만으로 요약한다 — 어느 쪽이 비어도 면접이 끊기지 않는다.
     """
-    transcript = _format_history(history)
+    transcript = format_history(history)
     try:
         data = await llm.generate_summary(transcript)
     except RuntimeError as error:
@@ -241,8 +244,8 @@ async def build_summary(
     return _summary_event(data, metrics or NonverbalMetrics())
 
 
-def _format_history(history: tuple[Turn, ...]) -> str:
-    """누적 턴을 LLM 요약 입력용 텍스트로 직렬화한다."""
+def format_history(history: tuple[Turn, ...]) -> str:
+    """누적 턴을 LLM 요약·리포트 입력용 텍스트로 직렬화한다(요약·결과 공용 공개 헬퍼)."""
     blocks = [
         f'Q{i}: {turn.question}\nA{i}: {turn.answer}\n평가{i}: {turn.evaluation}'
         for i, turn in enumerate(history, start=1)
