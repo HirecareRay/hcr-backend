@@ -18,7 +18,7 @@ from unittest.mock import AsyncMock, Mock
 from fastapi.testclient import TestClient
 
 from app.core.config import settings
-from app.interview import llm, nonverbal, stt
+from app.interview import llm, nonverbal, router, stt
 from app.main import app
 
 client = TestClient(app)
@@ -82,6 +82,36 @@ def test_ws_sends_generated_main_question_on_connect(monkeypatch):
     assert data['questionId'] == 'm0'
     assert data['text'] == '자기소개를 부탁드립니다'
     assert data['ttsText'] == '자기소개를 부탁드립니다'  # camelCase 직렬화 확인
+
+
+def test_ws_connect_with_query_params_still_returns_first_question(monkeypatch):
+    """companyId·token 쿼리를 받아도 DB 미연결 환경에선 mock 으로 우회해 첫 질문이 나온다."""
+    _patch_llm(monkeypatch, main_questions=['자기소개를 부탁드립니다', '강점은?'])
+
+    with client.websocket_connect(
+        '/interviews/ws/s1?companyId=abc123&token=invalid-token'
+    ) as ws:
+        data = ws.receive_json()
+
+    assert data['type'] == 'question'
+    assert data['questionId'] == 'm0'
+
+
+def test_decode_user_id_handles_missing_and_invalid_token(monkeypatch):
+    """토큰이 없거나 유효하지 않으면 None(익명) — 검증 성공 시 user_id 반환."""
+    assert router._decode_user_id(None) is None
+    assert router._decode_user_id('') is None
+
+    monkeypatch.setattr(router, 'decode_access_token', lambda token: '42')
+    assert router._decode_user_id('good-token') == '42'
+
+    import jwt
+
+    def _raise(token):
+        raise jwt.InvalidTokenError('bad')
+
+    monkeypatch.setattr(router, 'decode_access_token', _raise)
+    assert router._decode_user_id('bad-token') is None
 
 
 def test_ws_audio_accumulates_then_transcribes_and_streams_eval(monkeypatch):

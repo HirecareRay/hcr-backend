@@ -18,9 +18,11 @@ service.py 가 한다.
 import logging
 from dataclasses import dataclass, field, replace
 
+import jwt
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
+from app.auth.security import decode_access_token
 from app.core.config import settings
 from app.interview import nonverbal, service
 from app.interview.schemas import (
@@ -81,17 +83,67 @@ async def _send(websocket: WebSocket, event: BaseModel) -> None:
     await websocket.send_json(event.model_dump(by_alias=True))
 
 
+def _decode_user_id(token: str | None) -> str | None:
+    """WS 쿼리 토큰을 검증해 user_id 를 꺼낸다(없거나 유효하지 않으면 None).
+
+    브라우저 WS 는 Authorization 헤더를 못 붙이므로 토큰을 쿼리로 받는다. 검증
+    실패는 익명 진행으로 우회한다 — 개인화만 생략될 뿐 면접은 끊기지 않는다.
+    """
+    if not token:
+        return None
+    try:
+        return decode_access_token(token)
+    except jwt.PyJWTError as error:
+        logger.warning('면접 WS 토큰 검증 실패, 익명으로 진행: %s', error)
+        return None
+
+
+def _get_mongo_db(websocket: WebSocket):
+    """lifespan 이 app.state 에 올려둔 MongoDB 핸들을 꺼낸다(없으면 None)."""
+    client = getattr(websocket.app.state, 'mongo_client', None)
+    return client[settings.mongodb_db_name] if client is not None else None
+
+
+def _open_db_session(websocket: WebSocket):
+    """app.state 세션 팩토리로 MariaDB 세션을 연다(팩토리 없으면 None)."""
+    factory = getattr(websocket.app.state, 'session_factory', None)
+    return factory() if factory is not None else None
+
+
+async def _build_questions(websocket: WebSocket) -> list[str]:
+    """접속 쿼리(companyId·token)와 DB 로 개인화 메인 질문을 생성한다.
+
+    MariaDB 세션은 질문 생성 동안만 열고 곧장 닫는다 — 면접 루프는 DB 가 필요 없어
+    긴 세션 내내 풀 커넥션을 점유하지 않게 한다. MongoDB 핸들은 앱 수명이 관리한다.
+    """
+    params = websocket.query_params
+    company_id = params.get('companyId') or params.get('company_id')
+    user_id = _decode_user_id(params.get('token'))
+    mongo = _get_mongo_db(websocket)
+    db = _open_db_session(websocket)
+    try:
+        return await service.build_main_questions(
+            settings.interview_main_question_count,
+            company_id=company_id,
+            user_id=user_id,
+            db=db,
+            mongo=mongo,
+        )
+    finally:
+        if db is not None:
+            db.close()
+
+
 @router.websocket('/ws/{session_id}')
 async def interview_ws(websocket: WebSocket, session_id: str) -> None:
     """실시간 면접 WS.
 
-    접속 시 회사 컨텍스트로 메인 질문을 생성해 첫 질문을 보낸 뒤, 업스트림
-    프레임을 분기 처리한다(binary=답변 오디오 누적, text=control/landmark/event).
+    접속 시 회사 분석·지원자 이력서 컨텍스트로 메인 질문을 생성해 첫 질문을 보낸 뒤,
+    업스트림 프레임을 분기 처리한다(binary=답변 오디오 누적, text=control/landmark/event).
+    회사·지원자 식별자는 접속 쿼리(``?companyId=...&token=<JWT>``)로 받는다.
     """
     await websocket.accept()
-    questions = await service.build_main_questions(
-        settings.interview_main_question_count
-    )
+    questions = await _build_questions(websocket)
     first = questions[0]
     session = _WsSession(main_questions=tuple(questions), current_question=first)
     await _send(websocket, service.question_event('m0', first))
