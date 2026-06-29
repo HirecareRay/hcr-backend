@@ -70,6 +70,13 @@ class Settings(BaseSettings):
     # 연결 사이 지연에 걸린다. 10~300 으로 제한(기본 60).
     interview_ws_ticket_ttl_seconds: int = Field(60, ge=10, le=300)
 
+    # 면접 WS 보안 — CSWSH(Cross-Site WebSocket Hijacking) 방어용 허용 Origin 목록.
+    # 브라우저는 WS 핸드셰이크에 Origin 헤더를 위조 불가로 자동으로 싣지만, WS 엔
+    # CORS 가 적용되지 않으므로 서버가 직접 출처를 본다(파싱·판정은 ws_origin.py).
+    # 콤마 구분 다중 도메인 예: "https://hcr.example.com,https://www.hcr.example.com"
+    # ⚠️ 운영에선 반드시 .env 로 도메인을 채운다 — 비우면 개발 모드(로컬 프론트만 허용)다.
+    interview_allowed_origins: str = ""
+
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
 settings = Settings()
