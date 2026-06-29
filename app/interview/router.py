@@ -17,15 +17,19 @@ service.py 가 한다.
 
 import logging
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 
 import jwt
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, TypeAdapter, ValidationError
+from pymongo.database import Database
 
 from app.auth.security import decode_access_token
 from app.core.config import settings
-from app.interview import nonverbal, service, ws_ticket
+from app.db.mongo import get_mongo_db
+from app.interview import nonverbal, result_service, service, ws_ticket
+from app.interview.result_schemas import InterviewResult
 from app.interview.schemas import (
     ControlAction,
     ControlMessage,
@@ -77,6 +81,15 @@ class _WsSession:
     main_index: int = 0
     awaiting_followup: bool = False
     current_question: str = ''
+    # 결과 영속화(계약 ④)에 필요한 세션 메타 — 접속 시 1회 확정한다.
+    # user_id 는 소비한 티켓에서, company_id·job_title 은 접속 쿼리에서 온다.
+    # started_at 은 accept 시각(conducted_at·duration 기준), had_audio 는 mode 판별
+    # (답변 중 오디오가 한 번이라도 오면 voice, 아니면 text).
+    user_id: str = ''
+    company_id: str | None = None
+    job_title: str | None = None
+    started_at: datetime | None = None
+    had_audio: bool = False
     audio_chunks: list[bytes] = field(default_factory=list)
     # 더미 자막 모드에서 현재 답변에 흘린 부분 자막(=오디오 청크) 개수.
     # answer_start·answer_end 마다 0 으로 리셋해 답변별로 토큰 순번을 새로 센다.
@@ -127,6 +140,61 @@ async def issue_ws_ticket(
     return WsTicketOut(ticket=ticket, expires_in=expires_in)
 
 
+def _require_user(credentials: HTTPAuthorizationCredentials | None) -> str:
+    """Bearer JWT 를 검증해 user_id 를 확정한다(없거나 무효면 401)."""
+    if credentials is None:
+        raise _ticket_auth_error
+    try:
+        return decode_access_token(credentials.credentials)
+    except jwt.PyJWTError as error:
+        logger.warning('결과 조회 거부 — JWT 검증 실패: %s', error)
+        raise _ticket_auth_error from error
+
+
+_result_not_found = HTTPException(
+    status_code=status.HTTP_404_NOT_FOUND,
+    detail='면접 결과를 찾을 수 없습니다',
+)
+
+
+# by-id 를 먼저 선언한다 — '/results/by-id/...' 가 '/results/{company_id}' 로
+# 잘못 매칭되지 않도록(FastAPI 는 선언 순서대로 경로를 매칭한다).
+@router.get(
+    '/results/by-id/{result_id}',
+    response_model=InterviewResult,
+    response_model_by_alias=True,
+)
+async def get_result_by_id(
+    result_id: str,
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
+    mongo: Database = Depends(get_mongo_db),
+) -> InterviewResult:
+    """result_id(세션 식별자)로 결과를 조회한다(로그인·소유자 전용)."""
+    user_id = _require_user(credentials)
+    result = result_service.get_result_by_id(mongo, user_id, result_id)
+    if result is None:
+        raise _result_not_found
+    return result
+
+
+@router.get(
+    '/results/{company_id}',
+    response_model=InterviewResult,
+    response_model_by_alias=True,
+)
+async def get_result_by_company(
+    company_id: str,
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
+    mongo: Database = Depends(get_mongo_db),
+) -> InterviewResult:
+    """그 유저의 해당 회사 최신 면접 결과를 조회한다(로그인 전용)."""
+    user_id = _require_user(credentials)
+    result = result_service.get_result_by_company(mongo, user_id, company_id)
+    if result is None:
+        raise _result_not_found
+    return result
+
+
 def _get_mongo_db(websocket: WebSocket):
     """lifespan 이 app.state 에 올려둔 MongoDB 핸들을 꺼낸다(없으면 None)."""
     client = getattr(websocket.app.state, 'mongo_client', None)
@@ -139,19 +207,25 @@ def _open_db_session(websocket: WebSocket):
     return factory() if factory is not None else None
 
 
-async def _build_questions(websocket: WebSocket, user_id: str) -> list[str]:
-    """접속 쿼리(companyId·jobTitle)와 user_id·DB 로 개인화 메인 질문을 생성한다.
+def _read_context_params(websocket: WebSocket) -> tuple[str | None, str | None]:
+    """접속 쿼리에서 companyId·jobTitle 을 읽는다(camel·snake 둘 다 허용)."""
+    params = websocket.query_params
+    company_id = params.get('companyId') or params.get('company_id')
+    job_title = params.get('jobTitle') or params.get('job_title')
+    return company_id, job_title
 
-    user_id 는 핸들러가 입장 티켓을 소비해 확정한 값이다(여기로 주입된다). companyId·
-    jobTitle 은 선택 — companyId 가 없으면 회사 컨텍스트 주입만, jobTitle 이 없으면
-    직무 주입만 생략한다(query_params 는 URL 디코딩된 값을 준다).
+
+async def _build_questions(
+    websocket: WebSocket, user_id: str, company_id: str | None, job_title: str | None
+) -> list[str]:
+    """user_id·접속 쿼리·DB 로 개인화 메인 질문을 생성한다.
+
+    user_id 는 핸들러가 입장 티켓을 소비해 확정한 값이다. companyId·jobTitle 은 선택 —
+    companyId 가 없으면 회사 컨텍스트 주입만, jobTitle 이 없으면 직무 주입만 생략한다.
 
     MariaDB 세션은 질문 생성 동안만 열고 곧장 닫는다 — 면접 루프는 DB 가 필요 없어
     긴 세션 내내 풀 커넥션을 점유하지 않게 한다. MongoDB 핸들은 앱 수명이 관리한다.
     """
-    params = websocket.query_params
-    company_id = params.get('companyId') or params.get('company_id')
-    job_title = params.get('jobTitle') or params.get('job_title')
     mongo = _get_mongo_db(websocket)
     db = _open_db_session(websocket)
     try:
@@ -185,9 +259,18 @@ async def interview_ws(websocket: WebSocket, session_id: str) -> None:
         return
 
     await websocket.accept()
-    questions = await _build_questions(websocket, user_id)
+    started_at = datetime.now(timezone.utc)
+    company_id, job_title = _read_context_params(websocket)
+    questions = await _build_questions(websocket, user_id, company_id, job_title)
     first = questions[0]
-    session = _WsSession(main_questions=tuple(questions), current_question=first)
+    session = _WsSession(
+        main_questions=tuple(questions),
+        current_question=first,
+        user_id=user_id,
+        company_id=company_id,
+        job_title=job_title,
+        started_at=started_at,
+    )
     await _send(websocket, service.question_event('m0', first))
 
     try:
@@ -203,16 +286,20 @@ async def interview_ws(websocket: WebSocket, session_id: str) -> None:
             #    누적 중 일정 간격으로 재전사해 부분 자막을 흘린다.
             audio = raw.get('bytes')
             if audio is not None:
+                # 오디오가 한 번이라도 오면 음성 모드로 본다(결과 meta.mode 판별).
                 if settings.interview_dummy_transcript:
                     await _send(
                         websocket,
                         service.dummy_transcript_partial(session.transcript_sent),
                     )
                     session = replace(
-                        session, transcript_sent=session.transcript_sent + 1
+                        session,
+                        transcript_sent=session.transcript_sent + 1,
+                        had_audio=True,
                     )
                 else:
                     session = await _accumulate_audio(websocket, session, audio)
+                    session = replace(session, had_audio=True)
                 continue
 
             text = raw.get('text')
@@ -406,5 +493,17 @@ async def _next_main_or_summary(
     except Exception as error:  # noqa: BLE001 - 집계 실패가 요약을 막지 않게
         logger.error('비언어 집계 실패, 빈 지표로 요약 진행: %s', error)
         metrics = nonverbal.NonverbalMetrics()
+    # WS summary(계약 ② 라이브 채점)는 기존 경로 그대로 — 언어 점수 + 비언어 감점.
     await _send(websocket, await service.build_summary(session.history, metrics))
+    # 결과 페이지(계약 ④)용 영속화는 별개다 — 저장만 하고 송신하지 않는다(실패 흡수).
+    await result_service.persist_result(
+        history=session.history,
+        metrics=metrics,
+        user_id=session.user_id,
+        company_id=session.company_id,
+        job_title=session.job_title,
+        mode='voice' if session.had_audio else 'text',
+        started_at=session.started_at or datetime.now(timezone.utc),
+        mongo=_get_mongo_db(websocket),
+    )
     return session

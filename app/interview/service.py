@@ -31,11 +31,16 @@ _SCORE_MAX = 100.0
 
 @dataclass(frozen=True)
 class Turn:
-    """한 번의 질문-답변-평가 기록. 꼬리질문·요약의 입력이 된다."""
+    """한 번의 질문-답변-평가 기록. 꼬리질문·요약·결과 스크립트의 입력이 된다.
+
+    category 는 질문 분류(company/job/common) — 결과 스크립트(ScriptItem.category)에
+    매핑된다. 메인 질문 생성 시 태깅하고 꼬리질문은 부모 분류를 상속한다(기본 common).
+    """
 
     question: str
     answer: str
     evaluation: str
+    category: str = 'common'
 
 
 async def build_main_questions(
