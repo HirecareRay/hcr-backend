@@ -15,15 +15,22 @@ import logging
 import uuid
 from datetime import datetime, timezone
 
-from app.interview import llm, result_builder, result_repository, service
+from app.interview import (
+    llm,
+    nonverbal,
+    result_builder,
+    result_repository,
+    service,
+    voice,
+)
 from app.interview.nonverbal import NonverbalMetrics
 from app.interview.result_schemas import (
     InterviewComparison,
     InterviewResult,
     MetricDelta,
-    ModalFeedback,
     ResultMeta,
 )
+from app.interview.voice import VoiceMetrics
 
 logger = logging.getLogger(__name__)
 
@@ -32,25 +39,22 @@ async def persist_result(
     *,
     history: tuple[service.Turn, ...],
     metrics: NonverbalMetrics,
+    voice_metrics: VoiceMetrics | None = None,
     user_id: str,
     company_id: str | None,
     job_title: str | None,
     mode: str,
     started_at: datetime,
     mongo: object | None,
-    expression: ModalFeedback | None = None,
-    voice: ModalFeedback | None = None,
 ) -> None:
     """결과 페이지(계약 ④)용 InterviewResult 를 조립해 MongoDB 에 저장한다.
 
     저장할 곳(mongo)이 없으면 LLM 도 호출하지 않고 즉시 반환한다 — 저장 못 할 결과를
     위해 빌린 OpenAI 키를 낭비하지 않는다(테스트·DB 미연결 환경에서 실 API 도 안 탄다).
-    LLM 종합 1회로 언어 영역을 채우고, 비언어/음성 모달(expression·voice)은 주어지면
-    합친다(없으면 빈 모달 — Slice 2/3 또는 미수신). 직전 세션과 비교해 comparison 을
-    붙여 저장한다. 모든 예외를 흡수한다 — 영속화 실패는 면접 종료를 막지 않는다.
-
-    metrics 는 Slice 2 에서 expression 모달 환산에 쓰인다(현재는 호출부가 expression
-    을 직접 넘기지 않으면 빈 모달).
+    LLM 종합 1회로 언어 영역을 채우고, 표정 모달은 비언어 집계(metrics)에서, 음성 모달은
+    음성 집계(voice_metrics)에서 환산한다 — 데이터가 없으면 빈 모달로 정직하게 비운다.
+    직전 세션과 비교해 comparison 을 붙여 저장한다. 모든 예외를 흡수한다 — 영속화
+    실패는 면접 종료를 막지 않는다.
     """
     if mongo is None:
         return
@@ -59,12 +63,15 @@ async def persist_result(
         meta = _build_meta(
             history, user_id, company_id, job_title, mode, started_at, mongo
         )
+        # 표정·음성 모달은 각 집계에서 환산한다(데이터 없으면 None → builder 가 빈 모달).
+        expression_modal = nonverbal.to_modal_feedback(metrics)
+        voice_modal = voice.to_modal_feedback(voice_metrics) if voice_metrics else None
         result = result_builder.build_result(
             meta=meta,
             history=history,
             report=report,
-            expression=expression,
-            voice=voice,
+            expression=expression_modal,
+            voice=voice_modal,
         )
         _persist_with_comparison(mongo, user_id, company_id, meta, result)
     except Exception as error:  # noqa: BLE001 - 영속화 실패가 면접 종료를 막지 않게
