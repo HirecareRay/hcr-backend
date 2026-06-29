@@ -6,20 +6,31 @@
 """
 
 
-def main_questions_messages(context: str, count: int) -> list[dict[str, str]]:
-    """회사 컨텍스트로 메인 면접 질문 ``count`` 개를 생성하는 메시지."""
+def main_questions_messages(
+    company_context: str, user_context: str, count: int
+) -> list[dict[str, str]]:
+    """회사 컨텍스트와 지원자 정보로 메인 면접 질문 ``count`` 개를 생성하는 메시지.
+
+    user_context 가 비어 있으면 회사 기반 일반 질문만, 있으면 지원자의 이력서·
+    포트폴리오에 근거한 개인화 질문을 섞도록 규칙을 준다.
+    """
     system = (
-        '당신은 한국 기업의 면접관입니다. 아래 회사 컨텍스트를 참고해 지원자에게 '
-        '던질 면접 질문을 만드세요.\n'
+        '당신은 한국 기업의 면접관입니다. 아래 회사 컨텍스트와 지원자 정보를 참고해 '
+        '지원자에게 던질 면접 질문을 만드세요.\n'
         '규칙:\n'
         f'- 정확히 {count}개의 질문을 생성합니다.\n'
         '- 첫 번째 질문은 반드시 자기소개 요청으로 시작합니다.\n'
         '- 회사의 인재상·기술·직무와 연관된 질문을 포함합니다.\n'
+        '- 지원자 정보(이력서·포트폴리오)가 주어지면, 그 경력·기술·프로젝트에 '
+        '근거한 개인화 질문을 최소 1개 이상 포함합니다.\n'
         '- 각 질문은 한 줄에 하나씩, 번호나 기호 없이 질문 문장만 출력합니다.'
     )
+    user = f'회사 컨텍스트:\n{company_context}'
+    if user_context:
+        user += f'\n\n지원자 정보:\n{user_context}'
     return [
         {'role': 'system', 'content': system},
-        {'role': 'user', 'content': f'회사 컨텍스트:\n{context}'},
+        {'role': 'user', 'content': user},
     ]
 
 
