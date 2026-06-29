@@ -18,7 +18,7 @@ from unittest.mock import AsyncMock, Mock
 from fastapi.testclient import TestClient
 
 from app.core.config import settings
-from app.interview import llm, nonverbal, router, stt
+from app.interview import llm, nonverbal, router, service, stt, ws_ticket
 from app.main import app
 
 client = TestClient(app)
@@ -85,11 +85,11 @@ def test_ws_sends_generated_main_question_on_connect(monkeypatch):
 
 
 def test_ws_connect_with_query_params_still_returns_first_question(monkeypatch):
-    """companyId·token 쿼리를 받아도 DB 미연결 환경에선 mock 으로 우회해 첫 질문이 나온다."""
+    """companyId·ticket 쿼리를 받아도 DB 미연결 환경에선 mock 으로 우회해 첫 질문이 나온다."""
     _patch_llm(monkeypatch, main_questions=['자기소개를 부탁드립니다', '강점은?'])
 
     with client.websocket_connect(
-        '/interviews/ws/s1?companyId=abc123&token=invalid-token'
+        '/interviews/ws/s1?companyId=abc123&ticket=invalid-ticket'
     ) as ws:
         data = ws.receive_json()
 
@@ -97,21 +97,81 @@ def test_ws_connect_with_query_params_still_returns_first_question(monkeypatch):
     assert data['questionId'] == 'm0'
 
 
-def test_decode_user_id_handles_missing_and_invalid_token(monkeypatch):
-    """토큰이 없거나 유효하지 않으면 None(익명) — 검증 성공 시 user_id 반환."""
-    assert router._decode_user_id(None) is None
-    assert router._decode_user_id('') is None
-
+def test_ws_ticket_endpoint_issues_ticket_with_valid_bearer(monkeypatch):
+    """Bearer JWT 가 유효하면 200 + {ticket, expiresIn} 를 발급한다."""
     monkeypatch.setattr(router, 'decode_access_token', lambda token: '42')
-    assert router._decode_user_id('good-token') == '42'
 
+    res = client.post(
+        '/interviews/ws-ticket',
+        headers={'Authorization': 'Bearer good-token'},
+    )
+
+    assert res.status_code == 200
+    body = res.json()
+    assert isinstance(body['ticket'], str) and body['ticket']
+    assert body['expiresIn'] == settings.interview_ws_ticket_ttl_seconds
+
+
+def test_ws_ticket_endpoint_rejects_missing_bearer():
+    """Authorization 헤더가 없으면 401."""
+    assert client.post('/interviews/ws-ticket').status_code == 401
+
+
+def test_ws_ticket_endpoint_rejects_invalid_jwt(monkeypatch):
+    """JWT 가 무효면 401 (티켓 발급 거부)."""
     import jwt
 
     def _raise(token):
         raise jwt.InvalidTokenError('bad')
 
     monkeypatch.setattr(router, 'decode_access_token', _raise)
-    assert router._decode_user_id('bad-token') is None
+
+    res = client.post(
+        '/interviews/ws-ticket',
+        headers={'Authorization': 'Bearer bad-token'},
+    )
+    assert res.status_code == 401
+
+
+def test_ws_ticket_personalizes_and_is_consumed(monkeypatch):
+    """유효 티켓+companyId 면 그 user_id 가 질문 생성에 주입되고, 티켓은 1회용으로 폐기된다."""
+    _patch_llm(monkeypatch, main_questions=['자기소개를 부탁드립니다', '강점은?'])
+    captured: dict[str, object] = {}
+
+    async def _capture(count, *, company_id=None, user_id=None, db=None, mongo=None):
+        captured['company_id'] = company_id
+        captured['user_id'] = user_id
+        return ['자기소개를 부탁드립니다', '강점은?']
+
+    monkeypatch.setattr(service, 'build_main_questions', _capture)
+
+    ticket, _ = ws_ticket.issue_ticket('42', ttl_seconds=60)
+    url = f'/interviews/ws/s1?companyId=6a3ca079d7da326c0781963c&ticket={ticket}'
+    with client.websocket_connect(url) as ws:
+        ws.receive_json()
+
+    assert captured['user_id'] == '42'
+    assert captured['company_id'] == '6a3ca079d7da326c0781963c'
+    # 1회용 — 같은 티켓을 다시 소비하면 None(익명)
+    assert ws_ticket.consume_ticket(ticket) is None
+
+
+def test_ws_without_ticket_falls_back_to_anonymous(monkeypatch):
+    """티켓이 없으면 user_id=None(익명)으로 우회하고 면접은 그대로 진행된다."""
+    _patch_llm(monkeypatch, main_questions=['자기소개를 부탁드립니다', '강점은?'])
+    captured: dict[str, object] = {}
+
+    async def _capture(count, *, company_id=None, user_id=None, db=None, mongo=None):
+        captured['user_id'] = user_id
+        return ['자기소개를 부탁드립니다', '강점은?']
+
+    monkeypatch.setattr(service, 'build_main_questions', _capture)
+
+    with client.websocket_connect('/interviews/ws/s1') as ws:
+        data = ws.receive_json()
+
+    assert data['type'] == 'question'
+    assert captured['user_id'] is None
 
 
 def test_ws_audio_accumulates_then_transcribes_and_streams_eval(monkeypatch):

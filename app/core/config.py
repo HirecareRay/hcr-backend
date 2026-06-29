@@ -65,6 +65,11 @@ class Settings(BaseSettings):
     # 비용↑. 프론트 MediaRecorder timeslice 에 맞춰 튜닝한다. 1~50 으로 제한.
     interview_partial_transcript_every: int = Field(8, ge=1, le=50)
 
+    # 면접 WS 입장 티켓 TTL(초) — 브라우저 WS 는 헤더를 못 붙이므로 JWT 대신 단기·
+    # 1회용 티켓을 쿼리로 받는다. 짧을수록 URL 노출 위험이 줄지만 너무 짧으면 발급↔
+    # 연결 사이 지연에 걸린다. 10~300 으로 제한(기본 60).
+    interview_ws_ticket_ttl_seconds: int = Field(60, ge=10, le=300)
+
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
 settings = Settings()
