@@ -142,6 +142,8 @@ class QuestionEvent(CamelModel):
     question_id: str
     text: str
     tts_text: str | None = None
+    # 메인(기본) 질문인지 직전 답변 기반 꼬리질문인지 — 프론트 배지·흐름 표시용.
+    kind: Literal['main', 'follow_up'] = 'main'
 
 
 class TranscriptDeltaEvent(CamelModel):

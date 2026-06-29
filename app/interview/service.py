@@ -12,6 +12,7 @@ import logging
 import math
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from typing import Literal
 
 from app.interview import context, dummy_transcript, llm, nonverbal, stt
 from app.interview.nonverbal import NonverbalMetrics
@@ -100,9 +101,16 @@ def _ensure_question_count(questions: list[str], count: int) -> list[str]:
     return filled[:count]
 
 
-def question_event(question_id: str, text: str) -> QuestionEvent:
-    """질문 문자열을 다운스트림 이벤트로 감싼다(TTS 텍스트는 동일)."""
-    return QuestionEvent(question_id=question_id, text=text, tts_text=text)
+def question_event(
+    question_id: str, text: str, kind: Literal['main', 'follow_up'] = 'main'
+) -> QuestionEvent:
+    """질문 문자열을 다운스트림 이벤트로 감싼다(TTS 텍스트는 동일).
+
+    kind 는 메인(기본) 질문인지 꼬리질문인지 — 프론트가 흐름을 표시하는 데 쓴다.
+    """
+    return QuestionEvent(
+        question_id=question_id, text=text, tts_text=text, kind=kind
+    )
 
 
 async def transcribe_answer(audio: bytes) -> TranscriptDeltaEvent | None:

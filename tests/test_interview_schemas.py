@@ -105,6 +105,15 @@ def test_downstream_question_serializes_to_camel():
     assert dumped["questionId"] == "q1"
     assert dumped["ttsText"] == "자기소개"
     assert dumped["type"] == "question"  # 판별값은 snake 유지
+    assert dumped["kind"] == "main"  # 기본은 메인 질문
+
+
+def test_downstream_question_kind_follow_up():
+    event = QuestionEvent(
+        question_id="f0", text="그때 어떤 갈등이 있었나요", kind="follow_up"
+    )
+    dumped = event.model_dump(by_alias=True)
+    assert dumped["kind"] == "follow_up"
 
 
 def test_downstream_transcript_delta_serializes_to_camel():
