@@ -132,7 +132,7 @@ def build_company_report(db: Session, mongo: Database, company_id: str) -> dict:
     jp_count, jp_avg = repository.jobplanet_aggregate(db, company_id)
     jp_rows = repository.find_reviews(db, company_id)
     news_rows = repository.find_news(db, company_id)
-    job_rows = repository.find_jobs(db, company_id)
+    job_rows = repository.find_jobs(mongo, company_id)
     sim_ids = repository.find_similar_ids(db, company_id)
 
     def _a(name: str):  # analysis 속성(없으면 None)
@@ -230,19 +230,39 @@ def build_company_report(db: Session, mongo: Database, company_id: str) -> dict:
         } for n in news_rows],
     }
 
-    # ── hiring (공고 카드 — 상세는 빈값) ──
-    def _empty_job():
-        return {"name": "", "headcount": "", "locations": [], "responsibilities": [],
-                "requirements": [], "preferred": []}
-    openings = [{
-        "id": _s(j.id), "companyName": _s(j.company_name),
-        "title": _s(j.posting_title), "url": _s(j.source_url),
-        "job": _empty_job(),
-        "qualification": {"education": "", "major": "", "documents": []},
-        "process": [],
-        "workConditions": {"employmentType": "", "workType": "", "salary": "",
-                           "benefits": [], "deadline": None, "deadlineType": ""},
-    } for j in job_rows]   # ponytail: 상세는 job_postings 리치 재적재 시 채움
+    # ── hiring (공고 카드 — Mongo job_postings 리치) ──
+    def _opening(j: dict) -> dict:
+        jobs = j.get("jobs") or []
+        jb = jobs[0] if jobs else {}        # 카드는 대표 직무 1건 (ponytail)
+        tracks = jb.get("tracks") or {}
+        track = tracks.get("experienced") or tracks.get("newcomer") or {}
+        common = j.get("common") or {}
+        wc = j.get("work_conditions") or {}
+        return {
+            "id": _s(j.get("_id")), "companyName": _s(j.get("company_name")),
+            "title": _s(j.get("posting_title")), "url": _s(j.get("source_url")),
+            "job": {
+                "name": _s(jb.get("job_name")), "headcount": _s(jb.get("headcount")),
+                "locations": jb.get("locations") or [],
+                "responsibilities": jb.get("responsibilities") or [],
+                "requirements": track.get("requirements") or [],
+                "preferred": jb.get("preferred_common") or track.get("preferred") or [],
+            },
+            "qualification": {
+                "education": _s(common.get("education") or jb.get("education")),
+                "major": _s(common.get("major") or jb.get("major")),
+                "documents": common.get("documents") or [],
+            },
+            "process": j.get("process") or [],
+            "workConditions": {
+                "employmentType": _s(wc.get("employment_type")),
+                "workType": _s(wc.get("work_type")), "salary": _s(wc.get("salary")),
+                "benefits": wc.get("benefits") or [],
+                "deadline": wc.get("deadline") or None,
+                "deadlineType": _s(wc.get("deadline_type")),
+            },
+        }
+    openings = [_opening(j) for j in job_rows]
     hiring = {"summary": "", "openings": openings}
 
     # ── insight (swot/key_points + 유사기업) ──
