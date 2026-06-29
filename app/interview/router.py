@@ -28,7 +28,7 @@ from pymongo.database import Database
 from app.auth.security import decode_access_token
 from app.core.config import settings
 from app.db.mongo import get_mongo_db
-from app.interview import nonverbal, result_service, service, voice, ws_ticket
+from app.interview import result_service, service, ws_ticket
 from app.interview.result_schemas import InterviewResult
 from app.interview.schemas import (
     ControlAction,
@@ -506,18 +506,12 @@ async def _next_main_or_summary(
             awaiting_followup=False,
             current_question=text,
         )
-    try:
-        metrics = nonverbal.aggregate(session.landmarks, session.events)
-    except Exception as error:  # noqa: BLE001 - 집계 실패가 요약을 막지 않게
-        logger.error('비언어 집계 실패, 빈 지표로 요약 진행: %s', error)
-        metrics = nonverbal.NonverbalMetrics()
-    # WS summary(계약 ② 라이브 채점)는 기존 경로 그대로 — 언어 점수 + 비언어 감점.
-    await _send(websocket, await service.build_summary(session.history, metrics))
-    # 결과 페이지(계약 ④)용 영속화는 별개다 — 저장만 하고 송신하지 않는다(실패 흡수).
-    await result_service.persist_result(
+    # 집계·요약·영속화는 result_service 가 오케스트레이션한다(라우터는 송신만).
+    summary = await result_service.summarize_and_persist(
         history=session.history,
-        metrics=metrics,
-        voice_metrics=voice.aggregate(session.voice_metrics),
+        landmarks=session.landmarks,
+        events=session.events,
+        voice_frames=session.voice_metrics,
         user_id=session.user_id,
         company_id=session.company_id,
         job_title=session.job_title,
@@ -525,6 +519,7 @@ async def _next_main_or_summary(
         started_at=session.started_at or datetime.now(timezone.utc),
         mongo=_get_mongo_db(websocket),
     )
+    await _send(websocket, summary)
     # 종료 표시 — 이후 들어오는 control 은 _handle_message 에서 무시돼 LLM·저장이
     # 재실행되지 않는다(요약·평가·리포트 재호출로 인한 비용 남용 차단).
     return replace(session, finished=True)

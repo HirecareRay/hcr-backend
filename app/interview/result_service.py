@@ -15,6 +15,8 @@ import logging
 import uuid
 from datetime import datetime, timezone
 
+from pymongo.database import Database
+
 from app.interview import (
     llm,
     nonverbal,
@@ -25,14 +27,65 @@ from app.interview import (
 )
 from app.interview.nonverbal import NonverbalMetrics
 from app.interview.result_schemas import (
+    DeltaDirection,
     InterviewComparison,
+    InterviewMode,
     InterviewResult,
     MetricDelta,
     ResultMeta,
 )
+from app.interview.schemas import (
+    EventSnapshotMessage,
+    LandmarkFrameMessage,
+    SummaryEvent,
+    VoiceMetricMessage,
+)
 from app.interview.voice import VoiceMetrics
 
 logger = logging.getLogger(__name__)
+
+
+async def summarize_and_persist(
+    *,
+    history: tuple[service.Turn, ...],
+    landmarks: tuple[LandmarkFrameMessage, ...],
+    events: tuple[EventSnapshotMessage, ...],
+    voice_frames: tuple[VoiceMetricMessage, ...],
+    user_id: str,
+    company_id: str | None,
+    job_title: str | None,
+    mode: InterviewMode,
+    started_at: datetime,
+    mongo: Database | None,
+) -> SummaryEvent:
+    """요약 시점 마무리 — 비언어·음성을 집계해 WS summary 를 만들고 결과를 영속화한다.
+
+    라우터는 WS I/O 만 하도록, 비언어/음성 집계·요약·영속화 오케스트레이션을 여기로
+    모은다(레이어 원칙). 집계는 한 번만 해서 summary(계약 ②)와 결과 저장(계약 ④)이
+    같은 지표를 공유한다. 집계 실패는 빈 지표로 우회한다(면접 종료를 막지 않음).
+    반환한 SummaryEvent 는 라우터가 그대로 송신한다.
+    """
+    try:
+        metrics = nonverbal.aggregate(landmarks, events)
+    except Exception as error:  # noqa: BLE001 - 집계 실패가 요약을 막지 않게
+        logger.error('비언어 집계 실패, 빈 지표로 요약 진행: %s', error)
+        metrics = NonverbalMetrics()
+    voice_metrics = voice.aggregate(voice_frames)
+    # WS summary(계약 ② 라이브 채점)는 기존 경로 그대로 — 언어 점수 + 비언어 감점.
+    summary = await service.build_summary(history, metrics)
+    # 결과 페이지(계약 ④)용 영속화는 별개다 — 저장만 하고 송신하지 않는다(실패 흡수).
+    await persist_result(
+        history=history,
+        metrics=metrics,
+        voice_metrics=voice_metrics,
+        user_id=user_id,
+        company_id=company_id,
+        job_title=job_title,
+        mode=mode,
+        started_at=started_at,
+        mongo=mongo,
+    )
+    return summary
 
 
 async def persist_result(
@@ -43,9 +96,9 @@ async def persist_result(
     user_id: str,
     company_id: str | None,
     job_title: str | None,
-    mode: str,
+    mode: InterviewMode,
     started_at: datetime,
-    mongo: object | None,
+    mongo: Database | None,
 ) -> None:
     """결과 페이지(계약 ④)용 InterviewResult 를 조립해 MongoDB 에 저장한다.
 
@@ -84,7 +137,7 @@ async def _generate_report(
     """LLM 종합 리포트 dict 를 생성한다(빈 기록·실패면 빈 dict — 안전 기본값 우회)."""
     if not history:
         return {}
-    transcript = service._format_history(history)
+    transcript = service.format_history(history)
     try:
         return await llm.generate_report(transcript, (job_title or '').strip())
     except RuntimeError as error:
@@ -97,11 +150,14 @@ def _build_meta(
     user_id: str,
     company_id: str | None,
     job_title: str | None,
-    mode: str,
+    mode: InterviewMode,
     started_at: datetime,
-    mongo: object | None,
+    mongo: Database | None,
 ) -> ResultMeta:
-    """결과 메타를 만든다(result_id 신규 발급, duration·회사명 확정)."""
+    """결과 메타를 만든다(result_id 신규 발급, duration·회사명 확정).
+
+    mode 는 호출부(라우터)가 이미 'voice'/'text' 로 좁혀 넘기므로 여기서 재정규화하지 않는다.
+    """
     now = datetime.now(timezone.utc)
     duration = max(0, int((now - started_at).total_seconds()))
     return ResultMeta(
@@ -111,12 +167,12 @@ def _build_meta(
         job_title=(job_title or '').strip(),
         conducted_at=started_at.isoformat(),
         duration_sec=duration,
-        mode='voice' if mode == 'voice' else 'text',
+        mode=mode,
         question_count=len(history),
     )
 
 
-def _lookup_company_name(mongo: object | None, company_id: str | None) -> str:
+def _lookup_company_name(mongo: Database | None, company_id: str | None) -> str:
     """회사명을 best-effort 로 조회한다(없거나 실패하면 빈 문자열 — 면접을 막지 않음)."""
     if mongo is None or not company_id:
         return ''
@@ -131,7 +187,7 @@ def _lookup_company_name(mongo: object | None, company_id: str | None) -> str:
 
 
 def _persist_with_comparison(
-    mongo: object,
+    mongo: Database,
     user_id: str,
     company_id: str | None,
     meta: ResultMeta,
@@ -183,7 +239,7 @@ def _build_comparison(
 def _delta(label: str, previous: int, current: int) -> MetricDelta:
     """이전·현재 점수로 변화 지표를 만든다(direction 은 부호와 일치)."""
     diff = current - previous
-    direction = 'up' if diff > 0 else 'down' if diff < 0 else 'same'
+    direction: DeltaDirection = 'up' if diff > 0 else 'down' if diff < 0 else 'same'
     return MetricDelta(
         label=label, previous=previous, current=current, delta=diff, direction=direction
     )
@@ -223,7 +279,7 @@ def _feedback_score(result: dict, modal: str) -> int:
 
 
 def get_result_by_company(
-    mongo: object, user_id: str, company_id: str
+    mongo: Database, user_id: str, company_id: str
 ) -> InterviewResult | None:
     """그 유저의 해당 회사 최신 결과를 복원한다(없으면 None)."""
     document = result_repository.find_latest_by_company(mongo, user_id, company_id)
@@ -231,7 +287,7 @@ def get_result_by_company(
 
 
 def get_result_by_id(
-    mongo: object, user_id: str, result_id: str
+    mongo: Database, user_id: str, result_id: str
 ) -> InterviewResult | None:
     """result_id 로 결과를 복원한다(없거나 소유자가 아니면 None — 남의 결과 차단)."""
     document = result_repository.find_by_id(mongo, result_id)

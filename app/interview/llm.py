@@ -24,6 +24,10 @@ logger = logging.getLogger(__name__)
 # 저가 채팅 모델 고정. 바꾸면 비용이 오른다 — 변경은 신중히.
 _CHAT_MODEL = 'gpt-4o-mini'
 
+# 결과 리포트 1회 생성의 출력 토큰 상한(비용 폭주 방지). 정상 결과 JSON(종합·답변
+# 지표·강약점·보완점·턴별 평가·추천 질문)은 이 안에 충분히 들어간다.
+_REPORT_MAX_TOKENS = 2048
+
 # AsyncOpenAI 클라이언트는 지연 생성한다(import 시 키를 요구하지 않도록 — 테스트는
 # _get_client 를 mock 하므로 실 키 없이도 import·실행된다).
 _client: AsyncOpenAI | None = None
@@ -118,6 +122,9 @@ async def generate_report(transcript: str, job_title: str) -> dict:
                 prompts.report_messages(transcript, job_title),
             ),
             response_format={'type': 'json_object'},
+            # 출력 토큰 상한 — 비정상적으로 긴 결과로 과금이 폭주하지 않게 묶는다.
+            # 초과로 JSON 이 잘리면 파싱 실패 → 빈 dict → 안전 기본값으로 우회한다.
+            max_tokens=_REPORT_MAX_TOKENS,
         )
         text = resp.choices[0].message.content or ''
     except Exception as error:  # noqa: BLE001 - 외부 API 장애를 친화 메시지로 변환
