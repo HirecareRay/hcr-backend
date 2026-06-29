@@ -56,6 +56,10 @@ _ticket_auth_error = HTTPException(
 # tuple 복사 비용(특히 event_snapshot 의 base64 image)을 막는 방어선이다.
 _MAX_LANDMARKS = 1200  # ~20분 @ 1s
 _MAX_EVENTS = 500
+# 타이핑 답변(text_answer) 한 건의 최대 길이. 면접 답변은 길어야 수천 자라 넉넉하다.
+# 답변은 평가 1회 + 요약(매 턴 누적)으로 LLM 에 들어가므로, 거대한 붙여넣기로
+# 빌린 OpenAI 키 토큰을 증폭시키지 못하게 자른다(버리지 않고 앞부분만 — 면접 안 끊김).
+_MAX_ANSWER_CHARS = 5000
 
 
 @dataclass(frozen=True)
@@ -136,16 +140,18 @@ def _open_db_session(websocket: WebSocket):
 
 
 async def _build_questions(websocket: WebSocket, user_id: str) -> list[str]:
-    """접속 쿼리(companyId)와 user_id·DB 로 개인화 메인 질문을 생성한다.
+    """접속 쿼리(companyId·jobTitle)와 user_id·DB 로 개인화 메인 질문을 생성한다.
 
-    user_id 는 핸들러가 입장 티켓을 소비해 확정한 값이다(여기로 주입된다). companyId
-    는 선택 — 없으면 회사 컨텍스트 주입만 생략한다.
+    user_id 는 핸들러가 입장 티켓을 소비해 확정한 값이다(여기로 주입된다). companyId·
+    jobTitle 은 선택 — companyId 가 없으면 회사 컨텍스트 주입만, jobTitle 이 없으면
+    직무 주입만 생략한다(query_params 는 URL 디코딩된 값을 준다).
 
     MariaDB 세션은 질문 생성 동안만 열고 곧장 닫는다 — 면접 루프는 DB 가 필요 없어
     긴 세션 내내 풀 커넥션을 점유하지 않게 한다. MongoDB 핸들은 앱 수명이 관리한다.
     """
     params = websocket.query_params
     company_id = params.get('companyId') or params.get('company_id')
+    job_title = params.get('jobTitle') or params.get('job_title')
     mongo = _get_mongo_db(websocket)
     db = _open_db_session(websocket)
     try:
@@ -153,6 +159,7 @@ async def _build_questions(websocket: WebSocket, user_id: str) -> list[str]:
             settings.interview_main_question_count,
             company_id=company_id,
             user_id=user_id,
+            job_title=job_title,
             db=db,
             mongo=mongo,
         )
@@ -257,8 +264,9 @@ async def _handle_message(
         events = (session.events + (message,))[-_MAX_EVENTS:]
         return replace(session, events=events)
     # 텍스트 모드 답변 — 다운스트림 응답 없이 세션에 저장만 한다(answer_end 에서 사용).
+    # 토큰 비용 남용 방지로 상한까지만 저장한다(초과분은 잘라냄, 정상 답변은 안 걸림).
     if isinstance(message, TextAnswerMessage):
-        return replace(session, typed_answer=message.text)
+        return replace(session, typed_answer=message.text[:_MAX_ANSWER_CHARS])
     if not isinstance(message, ControlMessage):
         return session
 
