@@ -40,6 +40,15 @@ def save_document_field(db: Database, user_id: str, field_name: str, field_data:
         
     return user_id
 
+def find_user_documents(db: Database, user_id: str) -> dict | None:
+    """사용자의 파싱된 문서 1건(resume·cover_letter·projects·work_experience)을 조회한다.
+
+    면접 질문 개인화 등 읽기 전용 소비자가 쓴다. 없으면 None — 호출부가 개인화를
+    생략하도록 한다(컬렉션이 없으면 verify_and_get_collection 이 생성만 하고 None 반환).
+    """
+    collection = verify_and_get_collection(db)
+    return collection.find_one({"user_id": user_id})
+
 def delete_document_field(db: Database, user_id: str, field_name: str) -> bool:
     collection = verify_and_get_collection(db)
     result = collection.update_one(

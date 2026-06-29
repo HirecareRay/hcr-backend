@@ -18,9 +18,11 @@ service.py 가 한다.
 import logging
 from dataclasses import dataclass, field, replace
 
+import jwt
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
+from app.auth.security import decode_access_token
 from app.core.config import settings
 from app.interview import nonverbal, service
 from app.interview.schemas import (
@@ -66,6 +68,9 @@ class _WsSession:
     # 텍스트 모드 답변(타이핑) — text_answer 로 받으면 채운다. answer_end 시 오디오
     # 전사 대신 이 텍스트를 답변으로 쓴다. answer_start/answer_end 마다 비운다.
     typed_answer: str | None = None
+    # 부분 자막 모드에서 지금까지 흘려보낸 자막 누적 텍스트. 누적 버퍼 재전사 결과에서
+    # 이미 보낸 부분을 빼고 새 꼬리만 보내기 위한 기준. answer_start/answer_end 마다 비운다.
+    partial_text: str = ''
     history: tuple[service.Turn, ...] = ()
     # 비언어 신호는 audio_chunks 와 달리 저빈도(landmark ~1s, event 발생 시)라
     # 가변 list 대신 불변 tuple + replace 로 누적해 불변 패턴을 지킨다.
@@ -78,17 +83,67 @@ async def _send(websocket: WebSocket, event: BaseModel) -> None:
     await websocket.send_json(event.model_dump(by_alias=True))
 
 
+def _decode_user_id(token: str | None) -> str | None:
+    """WS 쿼리 토큰을 검증해 user_id 를 꺼낸다(없거나 유효하지 않으면 None).
+
+    브라우저 WS 는 Authorization 헤더를 못 붙이므로 토큰을 쿼리로 받는다. 검증
+    실패는 익명 진행으로 우회한다 — 개인화만 생략될 뿐 면접은 끊기지 않는다.
+    """
+    if not token:
+        return None
+    try:
+        return decode_access_token(token)
+    except jwt.PyJWTError as error:
+        logger.warning('면접 WS 토큰 검증 실패, 익명으로 진행: %s', error)
+        return None
+
+
+def _get_mongo_db(websocket: WebSocket):
+    """lifespan 이 app.state 에 올려둔 MongoDB 핸들을 꺼낸다(없으면 None)."""
+    client = getattr(websocket.app.state, 'mongo_client', None)
+    return client[settings.mongodb_db_name] if client is not None else None
+
+
+def _open_db_session(websocket: WebSocket):
+    """app.state 세션 팩토리로 MariaDB 세션을 연다(팩토리 없으면 None)."""
+    factory = getattr(websocket.app.state, 'session_factory', None)
+    return factory() if factory is not None else None
+
+
+async def _build_questions(websocket: WebSocket) -> list[str]:
+    """접속 쿼리(companyId·token)와 DB 로 개인화 메인 질문을 생성한다.
+
+    MariaDB 세션은 질문 생성 동안만 열고 곧장 닫는다 — 면접 루프는 DB 가 필요 없어
+    긴 세션 내내 풀 커넥션을 점유하지 않게 한다. MongoDB 핸들은 앱 수명이 관리한다.
+    """
+    params = websocket.query_params
+    company_id = params.get('companyId') or params.get('company_id')
+    user_id = _decode_user_id(params.get('token'))
+    mongo = _get_mongo_db(websocket)
+    db = _open_db_session(websocket)
+    try:
+        return await service.build_main_questions(
+            settings.interview_main_question_count,
+            company_id=company_id,
+            user_id=user_id,
+            db=db,
+            mongo=mongo,
+        )
+    finally:
+        if db is not None:
+            db.close()
+
+
 @router.websocket('/ws/{session_id}')
 async def interview_ws(websocket: WebSocket, session_id: str) -> None:
     """실시간 면접 WS.
 
-    접속 시 회사 컨텍스트로 메인 질문을 생성해 첫 질문을 보낸 뒤, 업스트림
-    프레임을 분기 처리한다(binary=답변 오디오 누적, text=control/landmark/event).
+    접속 시 회사 분석·지원자 이력서 컨텍스트로 메인 질문을 생성해 첫 질문을 보낸 뒤,
+    업스트림 프레임을 분기 처리한다(binary=답변 오디오 누적, text=control/landmark/event).
+    회사·지원자 식별자는 접속 쿼리(``?companyId=...&token=<JWT>``)로 받는다.
     """
     await websocket.accept()
-    questions = await service.build_main_questions(
-        settings.interview_main_question_count
-    )
+    questions = await _build_questions(websocket)
     first = questions[0]
     session = _WsSession(main_questions=tuple(questions), current_question=first)
     await _send(websocket, service.question_event('m0', first))
@@ -102,7 +157,8 @@ async def interview_ws(websocket: WebSocket, session_id: str) -> None:
             # 바이너리(audio_chunk)는 JSON 스키마가 없는 답변 오디오.
             #  - 더미 모드: 오디오는 쓰지 않으므로 버퍼링하지 않고, 청크마다 부분
             #    자막만 흘려 자막이 흐르게 한다(OpenAI 호출 0, 불필요한 메모리 적재 0).
-            #  - 실 모드: answer_end 에 통전사하기 위해 누적만 한다.
+            #  - 실 모드: answer_end 에 통전사하기 위해 누적한다. 부분 자막 모드면
+            #    누적 중 일정 간격으로 재전사해 부분 자막을 흘린다.
             audio = raw.get('bytes')
             if audio is not None:
                 if settings.interview_dummy_transcript:
@@ -114,7 +170,7 @@ async def interview_ws(websocket: WebSocket, session_id: str) -> None:
                         session, transcript_sent=session.transcript_sent + 1
                     )
                 else:
-                    session.audio_chunks.append(audio)
+                    session = await _accumulate_audio(websocket, session, audio)
                 continue
 
             text = raw.get('text')
@@ -129,6 +185,28 @@ async def interview_ws(websocket: WebSocket, session_id: str) -> None:
             session = await _handle_message(websocket, message, session)
     except WebSocketDisconnect:
         logger.info('면접 WS 종료: session=%s', session_id)
+
+
+async def _accumulate_audio(
+    websocket: WebSocket, session: _WsSession, audio: bytes
+) -> _WsSession:
+    """답변 오디오를 누적하고, 부분 자막 모드면 일정 간격으로 재전사해 자막을 흘린다.
+
+    부분 자막이 꺼져 있으면 누적만 한다(기존 배치 동작). 켜져 있으면 청크가
+    설정 간격(every)에 닿을 때마다 누적 버퍼를 재전사해 새 꼬리만 부분 자막으로
+    보낸다 — 전사 실패·새 내용 없음이면 조용히 건너뛴다(답변 진행을 막지 않음).
+    """
+    session.audio_chunks.append(audio)
+    if not settings.interview_partial_transcript:
+        return session
+    if len(session.audio_chunks) % settings.interview_partial_transcript_every != 0:
+        return session
+    buffer = b''.join(session.audio_chunks)
+    event = await service.transcribe_partial(buffer, session.partial_text)
+    if event is None:
+        return session
+    await _send(websocket, event)
+    return replace(session, partial_text=session.partial_text + event.delta)
 
 
 async def _handle_message(
@@ -150,9 +228,13 @@ async def _handle_message(
         return session
 
     if message.action is ControlAction.ANSWER_START:
-        # 새 답변 시작 — 이전 답변의 누적 오디오·자막 토큰 순번·타이핑 답변을 비운다
+        # 새 답변 시작 — 이전 답변의 누적 오디오·자막 순번·타이핑 답변·부분 자막을 비운다
         return replace(
-            session, audio_chunks=[], transcript_sent=0, typed_answer=None
+            session,
+            audio_chunks=[],
+            transcript_sent=0,
+            typed_answer=None,
+            partial_text='',
         )
 
     if message.action is ControlAction.ANSWER_END:
@@ -185,6 +267,7 @@ async def _finish_answer(websocket: WebSocket, session: _WsSession) -> _WsSessio
         audio_chunks=[],
         transcript_sent=0,
         typed_answer=None,
+        partial_text='',
         history=session.history + (turn,),
     )
 
@@ -215,10 +298,18 @@ async def _finalize_dummy(websocket: WebSocket, session: _WsSession) -> str:
 
 
 async def _transcribe(websocket: WebSocket, session: _WsSession) -> str:
-    """누적 오디오를 전사해 자막을 송신하고 답변 텍스트를 반환한다(빈 답변은 '')."""
+    """누적 오디오를 전사해 자막을 송신하고 답변 텍스트를 반환한다(빈 답변은 '').
+
+    부분 자막 모드면 최종 전사로 남은 꼬리만 final 자막을 보내고 전체를 답변으로
+    쓴다. 아니면(배치) answer_end 에 통전사해 전체 자막(final)을 한 번에 보낸다.
+    """
     audio = b''.join(session.audio_chunks)
     if not audio:
         return ''
+    if settings.interview_partial_transcript:
+        answer, event = await service.finalize_partial(audio, session.partial_text)
+        await _send(websocket, event)
+        return answer
     try:
         transcript = await service.transcribe_answer(audio)
     except RuntimeError as error:
