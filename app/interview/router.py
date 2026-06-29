@@ -83,6 +83,10 @@ class _WsSession:
     main_index: int = 0
     awaiting_followup: bool = False
     current_question: str = ''
+    # 요약(면접 종료)이 끝났는지. 요약 후 들어오는 control(next·answer_end)은 무시해
+    # 평가·요약·리포트(LLM)와 결과 저장이 재실행되지 못하게 막는다 — 한 티켓으로
+    # 무한히 과금 경로를 재호출하는 비용 남용을 차단한다(빌린 OpenAI 키 보호).
+    finished: bool = False
     # 결과 영속화(계약 ④)에 필요한 세션 메타 — 접속 시 1회 확정한다.
     # user_id 는 소비한 티켓에서, company_id·job_title 은 접속 쿼리에서 온다.
     # started_at 은 accept 시각(conducted_at·duration 기준), had_audio 는 mode 판별
@@ -365,6 +369,12 @@ async def _handle_message(
     if not isinstance(message, ControlMessage):
         return session
 
+    # 요약(종료) 후의 전이는 무시한다 — answer_end(평가 LLM)·next(요약·리포트 LLM +
+    # 결과 저장)가 재실행되지 못하게 막아, 한 티켓으로 과금 경로를 무한 재호출하는
+    # 비용 남용을 차단한다(데모·빌린 키 보호).
+    if session.finished:
+        return session
+
     if message.action is ControlAction.ANSWER_START:
         # 새 답변 시작 — 이전 답변의 누적 오디오·자막 순번·타이핑 답변·부분 자막을 비운다
         return replace(
@@ -515,4 +525,6 @@ async def _next_main_or_summary(
         started_at=session.started_at or datetime.now(timezone.utc),
         mongo=_get_mongo_db(websocket),
     )
-    return session
+    # 종료 표시 — 이후 들어오는 control 은 _handle_message 에서 무시돼 LLM·저장이
+    # 재실행되지 않는다(요약·평가·리포트 재호출로 인한 비용 남용 차단).
+    return replace(session, finished=True)

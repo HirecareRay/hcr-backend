@@ -364,6 +364,48 @@ def test_ws_summary_after_main_questions_exhausted(monkeypatch):
     assert summary['improvements'] == ['결론 강화']
 
 
+def test_ws_ignores_control_after_summary(monkeypatch):
+    """요약(종료) 후의 next·answer_end 는 무시돼 요약·평가가 재실행되지 않는다.
+
+    한 티켓으로 control 을 계속 보내 요약·리포트·평가(LLM)와 결과 저장을 무한 재호출하는
+    비용 남용을 막는 가드 검증(빌린 OpenAI 키 보호).
+    """
+    monkeypatch.setattr(settings, 'interview_main_question_count', 1)
+    _patch_llm(monkeypatch, main_questions=['자기소개 부탁드립니다'])
+
+    summary_calls = {'count': 0}
+    real_build_summary = service.build_summary
+
+    async def _counting_build_summary(history, metrics=None):
+        summary_calls['count'] += 1
+        return await real_build_summary(history, metrics)
+
+    monkeypatch.setattr(service, 'build_summary', _counting_build_summary)
+
+    with client.websocket_connect(_ws_url()) as ws:
+        assert ws.receive_json()['questionId'] == 'm0'
+        ws.send_bytes(b'a1')
+        ws.send_json({'type': 'control', 'action': 'answer_end'})
+        _drain(ws, 3)
+        ws.send_json({'type': 'control', 'action': 'next'})  # 꼬리질문
+        assert ws.receive_json()['questionId'] == 'f0'
+        ws.send_bytes(b'a2')
+        ws.send_json({'type': 'control', 'action': 'answer_end'})
+        _drain(ws, 3)
+        ws.send_json({'type': 'control', 'action': 'next'})  # 메인 소진 → 요약
+        assert ws.receive_json()['type'] == 'summary'
+
+        # 요약 후 추가 전이 — 모두 무시되어야 한다(추가 다운스트림·요약 재실행 없음).
+        ws.send_json({'type': 'control', 'action': 'next'})
+        ws.send_json({'type': 'control', 'action': 'answer_start'})
+        ws.send_bytes(b'a3')
+        ws.send_json({'type': 'control', 'action': 'answer_end'})
+        # 루프가 살아 있고 무시됐음을 확인 — landmark 는 원래 무응답이라 데드락 없이 종료.
+        ws.send_json({'type': 'landmark_frame', 'gaze_x': 0.1})
+
+    assert summary_calls['count'] == 1  # 요약은 단 한 번만 생성됨
+
+
 def test_ws_landmark_frame_has_no_downstream_response(monkeypatch):
     """비언어 프레임은 누적만 — 즉시 다운스트림 응답이 없어 루프를 깨지 않는다."""
     _patch_llm(monkeypatch, eval_deltas=['ok'])
