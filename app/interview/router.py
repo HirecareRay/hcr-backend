@@ -488,7 +488,10 @@ async def _try_follow_up(
     text = await service.generate_follow_up(last.question, last.answer)
     if not text:
         return None
-    await _send(websocket, service.question_event(f'f{session.main_index}', text))
+    await _send(
+        websocket,
+        service.question_event(f'f{session.main_index}', text, kind='follow_up'),
+    )
     return replace(session, current_question=text, awaiting_followup=True)
 
 
