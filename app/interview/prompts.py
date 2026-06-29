@@ -7,27 +7,37 @@
 
 
 def main_questions_messages(
-    company_context: str, user_context: str, count: int
+    company_context: str, user_context: str, job_title: str, count: int
 ) -> list[dict[str, str]]:
-    """회사 컨텍스트와 지원자 정보로 메인 면접 질문 ``count`` 개를 생성하는 메시지.
+    """회사·지원자·직무 컨텍스트로 메인 면접 질문 ``count`` 개를 생성하는 메시지.
 
-    user_context 가 비어 있으면 회사 기반 일반 질문만, 있으면 지원자의 이력서·
-    포트폴리오에 근거한 개인화 질문을 섞도록 규칙을 준다.
+    셋 다 선택적이다 — 있는 것만 user 메시지에 담는다. 회사 컨텍스트가 비면 일반
+    면접 질문, 지원자 정보가 있으면 그 경력·기술·프로젝트에 근거한 개인화 질문,
+    직무가 있으면 그 직무 적합성 질문을 섞도록 규칙을 준다. (셋 다 비어 이 함수까지
+    오는 일은 드물다 — 호출부가 빈 컨텍스트면 LLM 없이 기본질문으로 폴백한다.)
     """
     system = (
-        '당신은 한국 기업의 면접관입니다. 아래 회사 컨텍스트와 지원자 정보를 참고해 '
-        '지원자에게 던질 면접 질문을 만드세요.\n'
+        '당신은 한국 기업의 면접관입니다. 아래에 주어진 회사·지원자·직무 정보를 '
+        '참고해 지원자에게 던질 면접 질문을 만드세요.\n'
         '규칙:\n'
         f'- 정확히 {count}개의 질문을 생성합니다.\n'
         '- 첫 번째 질문은 반드시 자기소개 요청으로 시작합니다.\n'
-        '- 회사의 인재상·기술·직무와 연관된 질문을 포함합니다.\n'
-        '- 지원자 정보(이력서·포트폴리오)가 주어지면, 그 경력·기술·프로젝트에 '
-        '근거한 개인화 질문을 최소 1개 이상 포함합니다.\n'
+        '- 회사 정보가 주어지면 그 인재상·기술·직무와 연관된 질문을 포함합니다.\n'
+        '- 지원자 정보(이력서·자기소개서·포트폴리오·경력기술서)가 주어지면, 그 '
+        '경력·기술·프로젝트에 근거한 개인화 질문을 최소 1개 이상 포함합니다.\n'
+        '- 지원 직무가 주어지면 그 직무 적합성을 묻는 질문을 포함합니다.\n'
+        '- 회사·지원자·직무 정보가 비어 있으면 직무 무관한 일반 신입 면접 '
+        '기본 질문(지원동기·강점·성장경험 등)으로 구성합니다.\n'
         '- 각 질문은 한 줄에 하나씩, 번호나 기호 없이 질문 문장만 출력합니다.'
     )
-    user = f'회사 컨텍스트:\n{company_context}'
+    blocks: list[str] = []
+    if company_context:
+        blocks.append(f'회사 컨텍스트:\n{company_context}')
     if user_context:
-        user += f'\n\n지원자 정보:\n{user_context}'
+        blocks.append(f'지원자 정보:\n{user_context}')
+    if job_title:
+        blocks.append(f'지원 직무: {job_title}')
+    user = '\n\n'.join(blocks) if blocks else '(추가 정보 없음 — 일반 면접 질문 생성)'
     return [
         {'role': 'system', 'content': system},
         {'role': 'user', 'content': user},

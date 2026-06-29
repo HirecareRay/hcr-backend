@@ -20,7 +20,7 @@ from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 from app.core.config import settings
-from app.interview import llm, nonverbal, router, service, stt, ws_ticket
+from app.interview import context, llm, nonverbal, router, service, stt, ws_ticket
 from app.main import app
 
 client = TestClient(app)
@@ -74,8 +74,17 @@ def _patch_llm(
 
     더미 자막 플래그는 명시적으로 끈다 — 이 헬퍼를 쓰는 테스트는 실 STT 경로
     (answer_end 통전사) 를 검증하므로, 환경변수 누수로 더미가 켜져도 영향받지 않게 한다.
+
+    회사 컨텍스트도 비어 있지 않게 스텁한다 — 그래야 build_main_questions 가 빈
+    컨텍스트 단축 경로(LLM 미호출, 기본질문 폴백)를 타지 않고 mock LLM 으로 들어가
+    WS 파이프라인(질문 흐름)을 검증할 수 있다.
     """
     monkeypatch.setattr(settings, 'interview_dummy_transcript', False)
+
+    async def _stub_company(*args, **kwargs):
+        return '회사 컨텍스트'
+
+    monkeypatch.setattr(context, 'get_company_context', _stub_company)
     monkeypatch.setattr(
         llm,
         'generate_main_questions',
@@ -106,7 +115,7 @@ def test_ws_sends_generated_main_question_on_connect(monkeypatch):
 
 
 def test_ws_connect_with_company_id_still_returns_first_question(monkeypatch):
-    """유효 티켓+companyId 쿼리를 받아도 DB 미연결 환경에선 mock 으로 우회해 첫 질문이 나온다."""
+    """유효 티켓+companyId 쿼리를 받아도 DB 미연결 환경에선 기본 질문으로 첫 질문이 나온다."""
     _patch_llm(monkeypatch, main_questions=['자기소개를 부탁드립니다', '강점은?'])
 
     with client.websocket_connect(_ws_url(companyId='abc123')) as ws:
@@ -157,7 +166,9 @@ def test_ws_ticket_personalizes_and_is_consumed(monkeypatch):
     _patch_llm(monkeypatch, main_questions=['자기소개를 부탁드립니다', '강점은?'])
     captured: dict[str, object] = {}
 
-    async def _capture(count, *, company_id=None, user_id=None, db=None, mongo=None):
+    async def _capture(
+        count, *, company_id=None, user_id=None, job_title=None, db=None, mongo=None
+    ):
         captured['company_id'] = company_id
         captured['user_id'] = user_id
         return ['자기소개를 부탁드립니다', '강점은?']
@@ -173,6 +184,27 @@ def test_ws_ticket_personalizes_and_is_consumed(monkeypatch):
     assert captured['company_id'] == '6a3ca079d7da326c0781963c'
     # 1회용 — 같은 티켓을 다시 소비하면 None(폐기됨)
     assert ws_ticket.consume_ticket(ticket) is None
+
+
+def test_ws_passes_job_title_query_to_question_builder(monkeypatch):
+    """jobTitle 쿼리(URL 인코딩)가 디코딩돼 질문 생성에 그대로 전달된다."""
+    _patch_llm(monkeypatch, main_questions=['자기소개를 부탁드립니다', '강점은?'])
+    captured: dict[str, object] = {}
+
+    async def _capture(
+        count, *, company_id=None, user_id=None, job_title=None, db=None, mongo=None
+    ):
+        captured['job_title'] = job_title
+        return ['자기소개를 부탁드립니다', '강점은?']
+
+    monkeypatch.setattr(service, 'build_main_questions', _capture)
+
+    ticket, _ = ws_ticket.issue_ticket('42', ttl_seconds=60)
+    url = f'/interviews/ws/s1?jobTitle=%EB%B0%B1%EC%97%94%EB%93%9C%20%EA%B0%9C%EB%B0%9C%EC%9E%90&ticket={ticket}'
+    with client.websocket_connect(url) as ws:
+        ws.receive_json()
+
+    assert captured['job_title'] == '백엔드 개발자'
 
 
 def test_ws_rejects_connection_without_ticket(monkeypatch):
@@ -445,6 +477,23 @@ def test_ws_text_answer_takes_precedence_over_audio(monkeypatch):
 
     assert transcript['delta'] == '타이핑이 우선'
     stt.transcribe_audio.assert_not_awaited()  # 오디오 무시 → 전사 안 함
+
+
+def test_ws_text_answer_truncated_to_max_chars(monkeypatch):
+    """거대한 타이핑 답변은 상한까지만 잘라 저장한다(토큰 비용 남용 방지, 면접 안 끊김)."""
+    _patch_llm(monkeypatch, eval_deltas=['ok'])
+    huge = 'x' * (router._MAX_ANSWER_CHARS + 500)
+
+    with client.websocket_connect(_ws_url()) as ws:
+        ws.receive_json()  # 첫 질문
+        ws.send_json({'type': 'control', 'action': 'answer_start'})
+        ws.send_json({'type': 'text_answer', 'text': huge})
+        ws.send_json({'type': 'control', 'action': 'answer_end'})
+        transcript = ws.receive_json()
+        ws.receive_json()  # eval
+
+    assert len(transcript['delta']) == router._MAX_ANSWER_CHARS  # 상한까지만
+    assert transcript['delta'] == 'x' * router._MAX_ANSWER_CHARS
 
 
 def test_ws_answer_start_clears_typed_answer(monkeypatch):
