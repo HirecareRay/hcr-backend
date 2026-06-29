@@ -18,7 +18,7 @@ from unittest.mock import AsyncMock, Mock
 from fastapi.testclient import TestClient
 
 from app.core.config import settings
-from app.interview import llm, nonverbal, stt
+from app.interview import llm, nonverbal, router, stt
 from app.main import app
 
 client = TestClient(app)
@@ -82,6 +82,36 @@ def test_ws_sends_generated_main_question_on_connect(monkeypatch):
     assert data['questionId'] == 'm0'
     assert data['text'] == '자기소개를 부탁드립니다'
     assert data['ttsText'] == '자기소개를 부탁드립니다'  # camelCase 직렬화 확인
+
+
+def test_ws_connect_with_query_params_still_returns_first_question(monkeypatch):
+    """companyId·token 쿼리를 받아도 DB 미연결 환경에선 mock 으로 우회해 첫 질문이 나온다."""
+    _patch_llm(monkeypatch, main_questions=['자기소개를 부탁드립니다', '강점은?'])
+
+    with client.websocket_connect(
+        '/interviews/ws/s1?companyId=abc123&token=invalid-token'
+    ) as ws:
+        data = ws.receive_json()
+
+    assert data['type'] == 'question'
+    assert data['questionId'] == 'm0'
+
+
+def test_decode_user_id_handles_missing_and_invalid_token(monkeypatch):
+    """토큰이 없거나 유효하지 않으면 None(익명) — 검증 성공 시 user_id 반환."""
+    assert router._decode_user_id(None) is None
+    assert router._decode_user_id('') is None
+
+    monkeypatch.setattr(router, 'decode_access_token', lambda token: '42')
+    assert router._decode_user_id('good-token') == '42'
+
+    import jwt
+
+    def _raise(token):
+        raise jwt.InvalidTokenError('bad')
+
+    monkeypatch.setattr(router, 'decode_access_token', _raise)
+    assert router._decode_user_id('bad-token') is None
 
 
 def test_ws_audio_accumulates_then_transcribes_and_streams_eval(monkeypatch):
@@ -331,13 +361,89 @@ def test_ws_answer_start_clears_typed_answer(monkeypatch):
     stt.transcribe_audio.assert_not_awaited()
 
 
+# ── 실시간 부분 자막 (interview_partial_transcript) ────────────────────
+
+
+def _enable_partial(monkeypatch, *, every: int, transcripts: list[str]) -> None:
+    """부분 자막 모드를 켜고, 누적 버퍼 재전사가 점점 길어지는 텍스트를 반환하게 한다."""
+    monkeypatch.setattr(settings, 'interview_partial_transcript', True)
+    monkeypatch.setattr(settings, 'interview_partial_transcript_every', every)
+    monkeypatch.setattr(stt, 'transcribe_audio', AsyncMock(side_effect=transcripts))
+
+
+def test_ws_partial_transcript_streams_while_answering(monkeypatch):
+    """부분 자막 모드: every 청크마다 부분 자막(isFinal=False)을 흘리고,
+    answer_end 에 최종 전사로 남은 꼬리만 final 로 보낸다."""
+    _patch_llm(monkeypatch, eval_deltas=['ok'])
+    _enable_partial(
+        monkeypatch, every=2, transcripts=['안녕하세요', '안녕하세요 반갑습니다']
+    )
+
+    with client.websocket_connect('/interviews/ws/s1') as ws:
+        ws.receive_json()  # 첫 질문
+        ws.send_json({'type': 'control', 'action': 'answer_start'})
+        ws.send_bytes(b'c1')
+        ws.send_bytes(b'c2')  # every=2 → 부분 전사 1회
+        partial = ws.receive_json()
+        ws.send_json({'type': 'control', 'action': 'answer_end'})
+        final = ws.receive_json()
+        ws.receive_json()  # eval
+
+    assert partial['type'] == 'transcript_delta'
+    assert partial['isFinal'] is False
+    assert partial['delta'] == '안녕하세요'
+    assert final['isFinal'] is True
+    assert final['delta'] == ' 반갑습니다'  # 이미 보낸 부분 뒤 꼬리만
+    assert stt.transcribe_audio.await_count == 2  # 부분 1 + 최종 1
+
+
+def test_ws_partial_transcript_final_close_marker_when_no_new_text(monkeypatch):
+    """최종 전사가 부분 자막과 같으면 새 꼬리가 없어 빈 종료 마커(delta='')를 보낸다."""
+    _patch_llm(monkeypatch, eval_deltas=['ok'])
+    _enable_partial(monkeypatch, every=2, transcripts=['안녕하세요', '안녕하세요'])
+
+    with client.websocket_connect('/interviews/ws/s1') as ws:
+        ws.receive_json()  # 첫 질문
+        ws.send_json({'type': 'control', 'action': 'answer_start'})
+        ws.send_bytes(b'c1')
+        ws.send_bytes(b'c2')
+        partial = ws.receive_json()
+        ws.send_json({'type': 'control', 'action': 'answer_end'})
+        final = ws.receive_json()
+        ws.receive_json()  # eval
+
+    assert partial['delta'] == '안녕하세요'
+    assert final['delta'] == ''  # 새 내용 없음 → 종료 마커
+    assert final['isFinal'] is True
+
+
+def test_ws_partial_below_threshold_skips_partial_but_finalizes(monkeypatch):
+    """청크가 간격(every)에 못 미치면 부분 자막 없이, answer_end 에 전체를 final 로 낸다."""
+    _patch_llm(monkeypatch, eval_deltas=['ok'])
+    _enable_partial(monkeypatch, every=5, transcripts=['전체 답변입니다'])
+
+    with client.websocket_connect('/interviews/ws/s1') as ws:
+        ws.receive_json()  # 첫 질문
+        ws.send_json({'type': 'control', 'action': 'answer_start'})
+        ws.send_bytes(b'c1')
+        ws.send_bytes(b'c2')  # every=5 미달 → 부분 자막 없음
+        ws.send_json({'type': 'control', 'action': 'answer_end'})
+        final = ws.receive_json()
+        ws.receive_json()  # eval
+
+    assert final['type'] == 'transcript_delta'
+    assert final['isFinal'] is True
+    assert final['delta'] == '전체 답변입니다'  # 부분이 없었으니 전체가 꼬리
+    assert stt.transcribe_audio.await_count == 1  # 최종 전사 1회만
+
+
 # ── 더미 자막 스트리밍 모드 (interview_dummy_transcript=True) ──────────
 
 
 def test_ws_dummy_mode_streams_partial_transcript_per_chunk(monkeypatch):
     """더미 모드: 오디오 청크마다 부분 자막(isFinal=False)이 즉시 흐르고,
     answer_end 에 종료 마커(isFinal=True)가 온 뒤 평가가 스트리밍된다.
-    실 STT(whisper-1)는 호출되지 않는다(과금 0)."""
+    실 STT(gpt-4o-mini-transcribe)는 호출되지 않는다(과금 0)."""
     _patch_llm(monkeypatch, eval_deltas=['좋은 ', '답변'])
     monkeypatch.setattr(settings, 'interview_dummy_transcript', True)
 
