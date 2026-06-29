@@ -275,6 +275,62 @@ def test_ws_summary_sent_even_if_nonverbal_aggregate_raises(monkeypatch):
     assert summary['overallScore'] == 80.0  # 집계 실패 → 감점 0 으로 우회
 
 
+# ── 텍스트 모드 답변 (text_answer) ─────────────────────────────────────
+
+
+def test_ws_text_answer_used_as_answer_and_streams_eval(monkeypatch):
+    """타이핑 답변(text_answer)이 오면 전사 없이 그 텍스트로 자막(final)+평가를 낸다."""
+    _patch_llm(monkeypatch, eval_deltas=['좋은 ', '답변'])
+
+    with client.websocket_connect('/interviews/ws/s1') as ws:
+        ws.receive_json()  # 첫 질문
+        ws.send_json({'type': 'control', 'action': 'answer_start'})
+        ws.send_json({'type': 'text_answer', 'text': '제 강점은 끈기입니다'})
+        ws.send_json({'type': 'control', 'action': 'answer_end'})
+        transcript = ws.receive_json()
+        evals = [ws.receive_json() for _ in range(2)]
+
+    assert transcript['type'] == 'transcript_delta'
+    assert transcript['delta'] == '제 강점은 끈기입니다'  # 타이핑 본문이 자막으로
+    assert transcript['isFinal'] is True
+    assert ''.join(e['delta'] for e in evals) == '좋은 답변'  # 그 텍스트로 평가
+    stt.transcribe_audio.assert_not_awaited()  # 타이핑 답변 → 전사 미호출(과금 0)
+
+
+def test_ws_text_answer_takes_precedence_over_audio(monkeypatch):
+    """타이핑 답변이 있으면 같은 답변에 보낸 오디오는 무시하고 텍스트를 쓴다."""
+    _patch_llm(monkeypatch, eval_deltas=['ok'])
+
+    with client.websocket_connect('/interviews/ws/s1') as ws:
+        ws.receive_json()  # 첫 질문
+        ws.send_json({'type': 'control', 'action': 'answer_start'})
+        ws.send_bytes(b'audio-chunk')  # 오디오도 보냄
+        ws.send_json({'type': 'text_answer', 'text': '타이핑이 우선'})
+        ws.send_json({'type': 'control', 'action': 'answer_end'})
+        transcript = ws.receive_json()
+        ws.receive_json()  # eval
+
+    assert transcript['delta'] == '타이핑이 우선'
+    stt.transcribe_audio.assert_not_awaited()  # 오디오 무시 → 전사 안 함
+
+
+def test_ws_answer_start_clears_typed_answer(monkeypatch):
+    """answer_start 가 직전 타이핑 답변을 비워, 새 답변이 빈 채면 평가를 생략한다."""
+    _patch_llm(monkeypatch)
+
+    with client.websocket_connect('/interviews/ws/s1') as ws:
+        ws.receive_json()  # 첫 질문
+        ws.send_json({'type': 'text_answer', 'text': '버려질 답변'})
+        ws.send_json({'type': 'control', 'action': 'answer_start'})  # 리셋
+        ws.send_json({'type': 'control', 'action': 'answer_end'})  # 빈 답변
+        ws.send_json({'type': 'control', 'action': 'next'})
+        nxt = ws.receive_json()
+
+    # 타이핑 답변이 리셋돼 빈 답변 → 꼬리질문 생략 → 곧장 다음 메인
+    assert nxt['questionId'] == 'm1'
+    stt.transcribe_audio.assert_not_awaited()
+
+
 # ── 더미 자막 스트리밍 모드 (interview_dummy_transcript=True) ──────────
 
 
