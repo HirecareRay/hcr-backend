@@ -17,6 +17,7 @@ from app.interview.result_schemas import (
     InterviewResult,
     ModalFeedback,
     OverallScore,
+    QuestionCategory,
     RecommendedQuestions,
     ResultMeta,
     ScriptEvaluation,
@@ -182,9 +183,13 @@ def _recommended(data: object) -> RecommendedQuestions:
     )
 
 
-def _category(value: str) -> str:
-    """Turn.category 를 결과 계약의 허용값(company/job/common)으로 좁힌다."""
-    return value if value in ('company', 'job', 'common') else 'common'
+def _category(value: str) -> QuestionCategory:
+    """Turn.category·LLM 분류를 결과 계약의 허용값(company/job/common)으로 좁힌다."""
+    if value == 'company':
+        return 'company'
+    if value == 'job':
+        return 'job'
+    return 'common'
 
 
 def _default_grade(score: int) -> str:
@@ -212,9 +217,11 @@ def _str(value: object) -> str:
 
 
 def _to_int(value: object) -> int | None:
-    """정수로 강제(파싱 불가면 None)."""
+    """정수로 강제(숫자·숫자문자열만, 그 외·파싱 불가면 None)."""
+    if not isinstance(value, (int, float, str)):
+        return None
     try:
-        return int(value)  # type: ignore[arg-type]
+        return int(value)
     except (TypeError, ValueError):
         return None
 
