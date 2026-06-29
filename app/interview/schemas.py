@@ -154,3 +154,13 @@ DownstreamEvent = Annotated[
     Field(discriminator='type'),
 ]
 """다운스트림 이벤트 union. CamelModel 직렬화(by_alias=True)로 프론트에 내려간다."""
+
+
+# ── WS 입장 티켓 (HTTP 응답, CamelModel: snake→camel) ───────────────
+
+
+class WsTicketOut(CamelModel):
+    """POST /interviews/ws-ticket 응답 — 면접 WS 입장용 단기 1회용 티켓."""
+
+    ticket: str
+    expires_in: int  # → JSON: "expiresIn" (초)
