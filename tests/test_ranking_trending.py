@@ -62,10 +62,20 @@ def mongo():
     return mongomock.MongoClient().hcr_test
 
 
-def _seed_company(mongo, cid: str, name: str, industry: str = "미디어") -> None:
-    mongo["companies"].insert_one(
-        {"_id": ObjectId(cid), "company_name": name, "industry": industry}
-    )
+def _seed_company(
+    mongo,
+    cid: str,
+    name: str,
+    industry: str = "미디어",
+    website_url: str | None = None,
+    logo_url: str | None = None,
+) -> None:
+    doc = {"_id": ObjectId(cid), "company_name": name, "industry": industry}
+    if website_url is not None:
+        doc["website_url"] = website_url
+    if logo_url is not None:
+        doc["logo_url"] = logo_url
+    mongo["companies"].insert_one(doc)
 
 
 # ─── repository: 조회수 카운터 ────────────────────────────────────────
@@ -171,6 +181,58 @@ def test_get_trending_skips_company_missing_meta(db, mongo):
     assert cards[0]["rank"] == 1
 
 
+# ─── service: 로고 URL 산출 ───────────────────────────────────────────
+def test_get_trending_logo_url_prefers_curated(db, mongo):
+    # 큐레이션 logo_url 이 있으면 website_url 과 무관하게 그대로 쓴다
+    today = date.today()
+    repository.increment_view(db, CID_A, today)
+    db.commit()
+    _seed_company(
+        mongo,
+        CID_A,
+        "회사에이",
+        website_url="https://www.cj.net",
+        logo_url="https://cdn.example.com/a.png",
+    )
+
+    cards = service.get_trending(db, mongo, limit=5, window_days=7)
+    assert cards[0]["logo_url"] == "https://cdn.example.com/a.png"
+
+
+def test_get_trending_logo_url_auto_from_website(db, mongo):
+    # 큐레이션 없으면 website_url 도메인으로 CDN 로고 URL 을 만든다
+    today = date.today()
+    repository.increment_view(db, CID_A, today)
+    db.commit()
+    _seed_company(mongo, CID_A, "회사에이", website_url="https://www.cj.net")
+
+    cards = service.get_trending(db, mongo, limit=5, window_days=7)
+    assert cards[0]["logo_url"] == "https://logo.clearbit.com/cj.net"
+
+
+def test_get_trending_logo_url_none_when_no_source(db, mongo):
+    # logo_url·website_url 둘 다 없으면 None(프론트 이니셜 원 폴백)
+    today = date.today()
+    repository.increment_view(db, CID_A, today)
+    db.commit()
+    _seed_company(mongo, CID_A, "회사에이")
+
+    cards = service.get_trending(db, mongo, limit=5, window_days=7)
+    assert cards[0]["logo_url"] is None
+
+
+def test_get_trending_logo_url_off_when_base_empty(db, mongo, monkeypatch):
+    # base 빈 문자열이면 자동 산출을 끈다 — website_url 있어도 None
+    monkeypatch.setattr(service.settings, "ranking_logo_cdn_base", "")
+    today = date.today()
+    repository.increment_view(db, CID_A, today)
+    db.commit()
+    _seed_company(mongo, CID_A, "회사에이", website_url="https://www.cj.net")
+
+    cards = service.get_trending(db, mongo, limit=5, window_days=7)
+    assert cards[0]["logo_url"] is None
+
+
 def test_record_view_increments_via_own_session(session_factory):
     # record_view 는 팩토리로 새 세션을 열어 +1 하고 커밋·종료한다(BackgroundTasks 안전형)
     service.record_view(session_factory, CID_A)
@@ -216,8 +278,10 @@ def test_trending_endpoint_returns_camel_case(client, db, mongo):
     body = res.json()
     assert isinstance(body, list) and len(body) == 1
     card = body[0]
-    # camelCase 키로 직렬화돼야 한다
-    assert set(card) == {"rank", "companyId", "name", "parentName", "logoText", "logoColor"}
+    # camelCase 키로 직렬화돼야 한다(logoUrl 포함)
+    assert set(card) == {
+        "rank", "companyId", "name", "parentName", "logoText", "logoColor", "logoUrl"
+    }
     assert card["companyId"] == CID_A
     assert card["name"] == "카멜회사"
 

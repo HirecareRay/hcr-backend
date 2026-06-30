@@ -83,6 +83,10 @@ class Settings(BaseSettings):
     # 기본 7일 롤링으로 안정화한다(1~30). 노출 개수는 기본 5개(1~20).
     ranking_trending_window_days: int = Field(7, ge=1, le=30)
     ranking_trending_default_limit: int = Field(5, ge=1, le=20)
+    # 로고 CDN 베이스 — website_url 도메인으로 로고 URL(f"{base}/{domain}")을 만든다.
+    # Clearbit 은 로고 없으면 404 라 프론트 onError 폴백(이니셜 원)이 깔끔하다.
+    # 빈 값이면 자동 로고 산출을 끈다(큐레이션 logo_url 만 사용 — 외부 의존 차단 스위치).
+    ranking_logo_cdn_base: str = "https://logo.clearbit.com"
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
