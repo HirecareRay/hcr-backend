@@ -100,9 +100,32 @@ class TextAnswerMessage(BaseModel):
     text: str
 
 
+class VoiceMetricMessage(BaseModel):
+    """클라이언트 Web Audio API 가 추출한 음성 물리지표 (주기 ~1s, 답변 중 연속).
+
+    서버 직접 추론(Whisper·SER)은 운영 EC2(t3a.medium, GPU 없음)에서 OOM 위험이라,
+    데시벨·피치·말속도·떨림 같은 *물리 지표*만 브라우저에서 뽑아 올려보낸다. "감정"을
+    단정하지 않고 **발화 안정도 지표**로만 쓴다(가짜 감정 라벨을 만들지 않는다).
+
+    모든 필드는 선택 — 클라이언트가 추출 가능한 지표만 채워 보낸다. 결측은 집계에서
+    제외한다(landmark_frame 과 동일 철학). 단위: decibel(dB), pitch(Hz),
+    speech_rate(WPM, 분당 단어), tremor(0~1 떨림 정도).
+    """
+
+    type: Literal['voice_metric'] = 'voice_metric'
+    decibel: float | None = None
+    pitch: float | None = None
+    speech_rate: float | None = None
+    tremor: float | None = None
+
+
 UpstreamMessage = Annotated[
     Union[
-        ControlMessage, LandmarkFrameMessage, EventSnapshotMessage, TextAnswerMessage
+        ControlMessage,
+        LandmarkFrameMessage,
+        EventSnapshotMessage,
+        TextAnswerMessage,
+        VoiceMetricMessage,
     ],
     Field(discriminator='type'),
 ]
@@ -119,6 +142,8 @@ class QuestionEvent(CamelModel):
     question_id: str
     text: str
     tts_text: str | None = None
+    # 메인(기본) 질문인지 직전 답변 기반 꼬리질문인지 — 프론트 배지·흐름 표시용.
+    kind: Literal['main', 'follow_up'] = 'main'
 
 
 class TranscriptDeltaEvent(CamelModel):
