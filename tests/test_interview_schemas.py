@@ -68,11 +68,11 @@ def test_upstream_landmark_frame_parses():
 
 
 def test_upstream_event_snapshot_parses():
+    """이미지 없이 종류·메타만 보내도 검증을 통과해야 한다(프론트가 image 를 안 보냄)."""
     msg = upstream_adapter.validate_python(
         {
             "type": "event_snapshot",
             "event": "gaze_away",
-            "image": "data:image/png;base64,AAAA",
             "meta": {"duration_ms": 1200},
         }
     )
