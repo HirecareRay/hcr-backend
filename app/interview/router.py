@@ -66,6 +66,11 @@ _MAX_VOICE = 1200  # ~20분 @ 1s (landmark 와 동일 주기)
 # 답변은 평가 1회 + 요약(매 턴 누적)으로 LLM 에 들어가므로, 거대한 붙여넣기로
 # 빌린 OpenAI 키 토큰을 증폭시키지 못하게 자른다(버리지 않고 앞부분만 — 면접 안 끊김).
 _MAX_ANSWER_CHARS = 5000
+# 음성 답변 한 건의 오디오 청크 누적 상한(= 답변 최대 길이). 프론트 MediaRecorder
+# timeslice(250ms) 기준 1200청크 ≈ 5분. 초과분은 버린다(앞부분만 유지) — 무한 누적은
+# 메모리·자막 무한 증가 + 부분 자막이 매번 전체 버퍼를 재전사해 답변 길이에 제곱으로
+# 비싸지는 걸 부른다. 텍스트의 _MAX_ANSWER_CHARS 절단과 같은 취지(면접 안 끊고 길이만 캡).
+_MAX_AUDIO_CHUNKS = 1200  # ~5분 @ 250ms timeslice
 
 
 @dataclass(frozen=True)
@@ -310,6 +315,10 @@ async def interview_ws(websocket: WebSocket, session_id: str) -> None:
             if audio is not None:
                 # 오디오가 한 번이라도 오면 음성 모드로 본다(결과 meta.mode 판별).
                 if settings.interview_dummy_transcript:
+                    # 더미 자막도 같은 상한으로 막는다 — 무음이어도 청크가 무한히 와
+                    # 자막이 끝없이 쌓이는(화면 넘침) 걸 방지. 실 모드 누적 상한과 동일.
+                    if session.transcript_sent >= _MAX_AUDIO_CHUNKS:
+                        continue
                     await _send(
                         websocket,
                         service.dummy_transcript_partial(session.transcript_sent),
@@ -347,6 +356,10 @@ async def _accumulate_audio(
     설정 간격(every)에 닿을 때마다 누적 버퍼를 재전사해 새 꼬리만 부분 자막으로
     보낸다 — 전사 실패·새 내용 없음이면 조용히 건너뛴다(답변 진행을 막지 않음).
     """
+    # 누적 상한 초과분은 버린다(앞부분만 유지) — _MAX_AUDIO_CHUNKS 주석 참고.
+    # 더 안 쌓고 재전사도 멈춰, 긴 답변에서 메모리·자막·전사 비용이 무한정 늘지 않게 한다.
+    if len(session.audio_chunks) >= _MAX_AUDIO_CHUNKS:
+        return session
     session.audio_chunks.append(audio)
     if not settings.interview_partial_transcript:
         return session
