@@ -65,7 +65,7 @@ def _logo_url(meta: dict) -> str | None:
     """회사 메타 -> 로고 이미지 URL(문자열) 또는 None.
 
     1) logo_url 큐레이션 값이 있으면(strip 후 비지 않으면) 그대로 쓴다.
-    2) 없으면 website_url 도메인으로 CDN 로고 URL(f"{base}/{domain}")을 만든다.
+    2) 없으면 website_url 도메인으로 Google favicon URL(f"{base}?domain={d}&sz={n}")을 만든다.
        base(settings.ranking_logo_cdn_base)가 빈 문자열이면 자동 산출을 끄고 None.
     """
     curated = str(meta.get("logo_url") or "").strip()
@@ -75,7 +75,9 @@ def _logo_url(meta: dict) -> str | None:
     if not base:
         return None
     domain = _domain(meta.get("website_url"))
-    return f"{base}/{domain}" if domain else None
+    if not domain:
+        return None
+    return f"{base}?domain={domain}&sz={settings.ranking_logo_size}"
 
 
 def _card(rank: int, company_id: str, meta: dict) -> dict:
