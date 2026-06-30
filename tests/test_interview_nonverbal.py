@@ -18,7 +18,7 @@ def _frame(**kwargs) -> LandmarkFrameMessage:
 
 
 def _event(name: str) -> EventSnapshotMessage:
-    return EventSnapshotMessage(event=name, image='data:,')
+    return EventSnapshotMessage(event=name)
 
 
 # ── aggregate: 빈 입력 / 결측 방어 ────────────────────────────────
