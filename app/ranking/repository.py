@@ -65,11 +65,13 @@ def top_company_views(db: Session, since: date, limit: int) -> list[tuple[str, i
 
 
 # ─── MongoDB (회사 메타) ──────────────────────────────────────────────
-_META_FIELDS = {"company_name": 1, "industry": 1}
+# website_url·logo_url 은 로고 산출용(service._logo_url): logo_url 큐레이션 우선,
+# 없으면 website_url 도메인으로 CDN 로고 URL 을 만든다.
+_META_FIELDS = {"company_name": 1, "industry": 1, "website_url": 1, "logo_url": 1}
 
 
 def find_company_meta(mongo: Database, ids: list[str]) -> dict[str, dict]:
-    """순위 회사들의 표시용 메타 → {idStr: {company_name, industry}}.
+    """순위 회사들의 표시용 메타 → {idStr: {company_name, industry, website_url, logo_url}}.
 
     id 형식이 틀린 값은 건너뛴다(조용히 제외 — 순위에서 빠질 뿐 전체 실패는 아님).
     """
