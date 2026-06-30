@@ -116,6 +116,16 @@ def find_jobs(mongo: Database, company_id: str, limit: int = 20) -> list[dict]:
     )
 
 
+def find_jobs_by_company_ids(mongo: Database, company_ids: list[str], limit: int = 20) -> list[dict]:
+    """여러 회사(검색 결과)의 공고를 한 번에 조회. 검색 페이지 '연관 채용공고'용."""
+    if not company_ids:
+        return []
+    oids = [ObjectId(i) for i in company_ids]
+    return list(
+        mongo["job_postings"].find({"company_id": {"$in": oids}}).limit(limit)
+    )
+
+
 def find_similar_ids(db: Session, company_id: str, limit: int = 6) -> list[str]:
     return list(
         db.execute(
