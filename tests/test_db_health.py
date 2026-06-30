@@ -21,15 +21,22 @@ def _request_without_db() -> SimpleNamespace:
     return SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
 
 
-def test_db_health_endpoint_returns_structure():
-    """lifespan 을 태운 채 /health/db 가 정해진 구조로 응답한다."""
-    with TestClient(app) as client:
-        res = client.get("/health/db")
+def test_db_health_endpoint_ok_when_both_up(monkeypatch):
+    """둘 다 붙으면 status 'ok'. 헬스체크를 가짜로 고정해 라이브 DB·터널에 의존하지
+    않는다(lifespan 미부팅 — 실 연결 타임아웃으로 느려지지 않게)."""
+    monkeypatch.setattr("app.main.check_mariadb", lambda engine: True)
+    monkeypatch.setattr("app.main.check_mongodb", lambda client: (True, []))
+    res = TestClient(app).get("/health/db")
     assert res.status_code == 200
-    body = res.json()
-    assert body["status"] in {"ok", "degraded"}
-    assert isinstance(body["mariadb"], bool)
-    assert isinstance(body["mongodb"], bool)
+    assert res.json() == {"status": "ok", "mariadb": True, "mongodb": True}
+
+
+def test_db_health_endpoint_degraded_when_one_down(monkeypatch):
+    """하나라도 끊기면 status 'degraded'. mongodb 는 튜플이 아니라 bool 로 나가야 한다."""
+    monkeypatch.setattr("app.main.check_mariadb", lambda engine: True)
+    monkeypatch.setattr("app.main.check_mongodb", lambda client: (False, []))
+    body = TestClient(app).get("/health/db").json()
+    assert body == {"status": "degraded", "mariadb": True, "mongodb": False}
 
 
 def test_get_db_raises_without_factory():
