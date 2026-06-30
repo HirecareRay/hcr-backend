@@ -110,6 +110,40 @@ def search_companies(mongo: Database, q: str, limit: int = 20) -> list[dict]:
     } for c in repository.search_companies(mongo, rx, limit)]
 
 
+def search_company_jobs(mongo: Database, q: str, limit: int = 20) -> list[dict]:
+    """검색 결과 회사들의 채용공고 — /search 페이지 '연관 채용공고'용.
+
+    q 매칭 회사들 → 그 회사들의 job_postings → 카드용 평탄 리스트.
+    """
+    q = (q or "").strip()
+    if not q:
+        return []
+    rx = {"$regex": re.escape(q), "$options": "i"}
+    companies = repository.search_companies(mongo, rx, limit)
+    ids = [str(c["_id"]) for c in companies]
+    jobs = repository.find_jobs_by_company_ids(mongo, ids, limit)
+    return [_related_job(j) for j in jobs]
+
+
+def _related_job(j: dict) -> dict:
+    """job_postings 문서 → 연관공고 카드(RelatedJobPosting) 형태."""
+    wc = j.get("work_conditions") or {}
+    dtype = _s(wc.get("deadline_type"))
+    deadline_raw = wc.get("deadline")
+    if dtype == "rolling" or not deadline_raw:
+        deadline = "상시채용"
+    else:
+        deadline = f"{str(deadline_raw).replace('-', '.')} 마감"
+    return {
+        "id": str(j["_id"]),
+        "companyName": _s(j.get("company_name")),
+        "title": _s(j.get("posting_title")),
+        "url": _s(j.get("source_url")),
+        "employmentType": _s(wc.get("employment_type")),
+        "deadline": deadline,
+    }
+
+
 def get_company(mongo: Database, company_id: str) -> dict:
     """회사 기본정보 1건(_id 문자열화). 없으면 CompanyNotFound."""
     doc = repository.find_company(mongo, company_id)
