@@ -25,6 +25,7 @@ from app.core.config import settings
 from app.db.health import check_mariadb, check_mongodb
 from app.db.mongo import build_mongo_client
 from app.db.session import Base, build_engine, build_session_factory
+from app.analysis.router import router as analysis_router
 from app.documents.router import router as documents_router
 from app.interview.router import router as interview_router
 from app.search.router import router as search_router
@@ -84,6 +85,7 @@ app.add_middleware(
 
 # 도메인별 라우터 등록
 app.include_router(auth_router)
+app.include_router(analysis_router)
 app.include_router(company_router)
 app.include_router(documents_router)
 app.include_router(interview_router)
