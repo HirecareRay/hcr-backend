@@ -28,6 +28,12 @@ def main_questions_messages(
         '- 지원 직무가 주어지면 그 직무 적합성을 묻는 질문을 포함합니다.\n'
         '- 회사·지원자·직무 정보가 비어 있으면 직무 무관한 일반 신입 면접 '
         '기본 질문(지원동기·강점·성장경험 등)으로 구성합니다.\n'
+        '- 실제 면접관이 말로 묻듯, 자연스러운 구어체로 작성합니다.\n'
+        '- "~에 맞춰", "~와 연관된" 같은 기계적·문어체 표현을 쓰지 않습니다.\n'
+        '- 한 질문에는 한 가지만 묻습니다(인재상·협업·문제해결처럼 여러 주제를 '
+        '한 문장에 욱여넣지 않습니다).\n'
+        '- 회사명이나 인재상을 언급할 땐 그대로 나열하지 말고, 질문 의도에 '
+        '자연스럽게 녹여 묻습니다.\n'
         '- 각 질문은 한 줄에 하나씩, 번호나 기호 없이 질문 문장만 출력합니다.'
     )
     blocks: list[str] = []
@@ -48,7 +54,9 @@ def follow_up_messages(question: str, answer: str) -> list[dict[str, str]]:
     """직전 질문·답변을 바탕으로 꼬리질문 하나를 생성하는 메시지."""
     system = (
         '당신은 면접관입니다. 지원자의 직전 답변을 듣고 더 깊이 파고드는 '
-        '꼬리질문을 하나만 생성하세요. 한국어 한 문장으로, 질문만 출력합니다.'
+        '꼬리질문을 하나만 생성하세요. 실제 면접관이 말로 되묻듯 자연스러운 '
+        '구어체 한 문장으로, "~에 맞춰"·"~와 연관된" 같은 기계적 표현 없이 '
+        '질문만 출력합니다.'
     )
     user = f'직전 질문: {question}\n지원자 답변: {answer}'
     return [
@@ -87,4 +95,50 @@ def summary_messages(transcript: str) -> list[dict[str, str]]:
     return [
         {'role': 'system', 'content': system},
         {'role': 'user', 'content': f'면접 기록:\n{transcript}'},
+    ]
+
+
+def report_messages(transcript: str, job_title: str) -> list[dict[str, str]]:
+    """면접 전체 기록으로 결과 리포트의 LLM 영역을 한 JSON 으로 생성하는 메시지.
+
+    요약(summary_messages)과 달리, 결과 페이지(계약 ④)에 필요한 풍부한 산출물을
+    1회 호출로 모두 만든다 — 종합 점수·답변 피드백·강약점·보완점·턴별 평가·추천 질문.
+    응답은 JSON 한 덩어리만(키는 내부 표기 snake_case). 점수는 모두 0~100 정수.
+
+    script 평가는 면접 기록의 각 턴 번호(no, 1부터)에 1:1 대응시킨다 — no 는 기록에
+    나온 질문 순서다. 추천 질문은 기록에 드러난 회사·직무 맥락에 근거해 생성한다.
+    """
+    job_line = f'지원 직무: {job_title}\n' if job_title else ''
+    system = (
+        '당신은 면접관입니다. 아래 면접 전체 기록을 보고 지원자 평가 리포트를 '
+        'JSON 으로만 출력하세요. 모든 점수는 0~100 사이 정수입니다. '
+        '키와 형식은 정확히 다음을 따릅니다:\n'
+        '{\n'
+        '  "overall": {"score": 정수, "grade": "A/B+/B 같은 등급 라벨", '
+        '"headline": "한 줄 총평"},\n'
+        '  "answer_feedback": {"score": 정수, "summary": "답변 영역 총평", '
+        '"metrics": [{"label": "논리 구조", "score": 정수, "value": "우수/보통 같은 짧은 평", '
+        '"comment": "한 줄 코멘트"}]},\n'
+        '  "strengths": ["강점 문장", ...],\n'
+        '  "weaknesses": ["약점 문장", ...],\n'
+        '  "improvements": [{"area": "보완 영역", "problem": "무엇이 부족했나", '
+        '"method": "구체적 보완 방법"}],\n'
+        '  "script": [{"no": 정수, "category": "company 또는 job 또는 common", '
+        '"score": 정수, "good": "잘한 점", "improve": "개선점"}],\n'
+        '  "recommended_questions": {"company": ["회사 관련 예상 질문", ...], '
+        '"job": ["직무 관련 예상 질문", ...]}\n'
+        '}\n'
+        '규칙:\n'
+        '- answer_feedback.metrics 는 논리 구조·구체성·직무 적합성·질문 이해도 등 '
+        '4개 내외로 채웁니다.\n'
+        '- script 는 면접 기록의 각 턴(no=질문 순서, 1부터)마다 하나씩 만들고, '
+        'category 는 회사 특정 질문이면 "company", 직무 역량 질문이면 "job", '
+        '일반 질문이면 "common" 으로 분류합니다.\n'
+        '- strengths·weaknesses 는 각 2~4개, improvements 는 2~3개, '
+        'recommended_questions 의 company·job 은 각 3~4개로 만듭니다.\n'
+        '- JSON 외의 어떤 텍스트도 출력하지 마세요.'
+    )
+    return [
+        {'role': 'system', 'content': system},
+        {'role': 'user', 'content': f'{job_line}면접 기록:\n{transcript}'},
     ]

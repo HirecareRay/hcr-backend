@@ -139,3 +139,38 @@ def test_score_penalty_bounded():
     events = tuple(_event('gaze_away') for _ in range(100))
     penalty = nonverbal.score_penalty(nonverbal.aggregate(frames, events))
     assert penalty >= nonverbal.MAX_PENALTY
+
+
+# ── to_modal_feedback: 결과 표정 모달 환산 (계약 ④) ────────────────
+
+
+def test_modal_none_when_no_data():
+    """비언어 데이터가 없으면 None — 호출부가 빈 모달로 정직하게 비운다."""
+    assert nonverbal.to_modal_feedback(nonverbal.aggregate((), ())) is None
+
+
+def test_modal_gaze_off_lowers_gaze_score():
+    """시선이탈이 심하면 '시선 처리' 점수가 낮아진다(물리지표 기반)."""
+    frames = tuple(_frame(gaze_x=0.9) for _ in range(10))
+    modal = nonverbal.to_modal_feedback(nonverbal.aggregate(frames, ()))
+    gaze = next(m for m in modal.metrics if m.label == '시선 처리')
+    assert gaze.score == 0  # 이탈 100% → 0점
+    assert 0 <= modal.score <= 100
+
+
+def test_modal_stable_gaze_high_score():
+    """시선이 중앙이면 '시선 처리' 점수가 높다."""
+    frames = tuple(_frame(gaze_x=0.0, gaze_y=0.0) for _ in range(10))
+    modal = nonverbal.to_modal_feedback(nonverbal.aggregate(frames, ()))
+    gaze = next(m for m in modal.metrics if m.label == '시선 처리')
+    assert gaze.score == 100
+
+
+def test_modal_adds_attention_metric_when_events():
+    """주의 이벤트가 있으면 '주의 집중' 지표가 붙고 이벤트 수만큼 깎인다."""
+    frames = tuple(_frame(gaze_x=0.0) for _ in range(3))
+    events = tuple(_event('gaze_away') for _ in range(2))
+    modal = nonverbal.to_modal_feedback(nonverbal.aggregate(frames, events))
+    attention = next(m for m in modal.metrics if m.label == '주의 집중')
+    assert attention.score == 90  # 100 - 2*5
+    assert '2회' in attention.value
