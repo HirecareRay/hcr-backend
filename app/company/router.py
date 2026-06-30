@@ -23,6 +23,15 @@ def search_companies(q: str = "", mongo: Database = Depends(get_mongo_db)):
     return service.search_companies(mongo, q)
 
 
+@router.get("/jobs")
+def search_company_jobs(q: str = "", mongo: Database = Depends(get_mongo_db)):
+    """검색 결과 회사들의 연관 채용공고 — q 매칭 회사들의 공고 리스트.
+
+    주의: /{company_id} 보다 먼저 정의해야 'jobs'가 id로 안 잡힌다.
+    """
+    return service.search_company_jobs(mongo, q)
+
+
 @router.get("/{company_id}")
 def get_company(company_id: str, mongo: Database = Depends(get_mongo_db)):
     """회사 기본정보 — Mongo companies._id(ObjectId)로 조회."""
