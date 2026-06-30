@@ -27,6 +27,8 @@ from app.db.mongo import build_mongo_client
 from app.db.session import Base, build_engine, build_session_factory
 from app.documents.router import router as documents_router
 from app.interview.router import router as interview_router
+from app.ranking import models as _ranking_models  # noqa: F401  (create_all 용 테이블 등록)
+from app.ranking.router import router as ranking_router
 from app.search.router import router as search_router
 
 logger = logging.getLogger(__name__)
@@ -87,6 +89,7 @@ app.include_router(auth_router)
 app.include_router(company_router)
 app.include_router(documents_router)
 app.include_router(interview_router)
+app.include_router(ranking_router)
 app.include_router(search_router)
 
 
@@ -104,7 +107,8 @@ def db_health_check(request: Request):
     (드라이버·연결 정보가 맞는지 팀에서 빠르게 확인하는 용도)
     """
     mariadb_ok = check_mariadb(getattr(request.app.state, "db_engine", None))
-    mongodb_ok = check_mongodb(getattr(request.app.state, "mongo_client", None))
+    # check_mongodb 는 (연결여부, 콜렉션목록) 튜플을 준다 — 헬스 응답엔 bool 만 쓴다.
+    mongodb_ok, _collections = check_mongodb(getattr(request.app.state, "mongo_client", None))
     return {
         "status": "ok" if mariadb_ok and mongodb_ok else "degraded",
         "mariadb": mariadb_ok,
