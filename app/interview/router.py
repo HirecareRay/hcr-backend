@@ -28,7 +28,7 @@ from pymongo.database import Database
 from app.auth.security import decode_access_token
 from app.core.config import settings
 from app.db.mongo import get_mongo_db
-from app.interview import result_service, service, ws_ticket
+from app.interview import result_service, service, ws_origin, ws_ticket
 from app.interview.result_schemas import InterviewResult
 from app.interview.schemas import (
     ControlAction,
@@ -260,7 +260,21 @@ async def interview_ws(websocket: WebSocket, session_id: str) -> None:
     인증을 통과하면 회사 분석·지원자 이력서 컨텍스트로 메인 질문을 생성해 첫 질문을
     보낸 뒤, 업스트림 프레임을 분기 처리한다(binary=답변 오디오 누적, text=control/
     landmark/event). 티켓은 POST /interviews/ws-ticket 으로 미리 발급받는다.
+
+    검사 순서는 ① Origin 허용목록 → ② 티켓 소비 → ③ accept. 출처부터 막아 허용되지
+    않은 사이트(CSWSH)의 연결이 티켓 소비·LLM·과금 경로에 닿지 않게 한다.
     """
+    # ① Origin 검증 — WS 엔 CORS 가 안 먹으므로 서버가 직접 출처를 본다(CSWSH 방어).
+    # accept·티켓 소비 전에 끊는다. 차단 추적용으로 origin 값만 남기고, 토큰/티켓
+    # 평문은 로깅하지 않는다. 판정·개발 모드 분기는 ws_origin.is_allowed_origin 참고.
+    ws_origin.warn_once_if_dev_mode()  # 운영 오설정(허용목록 미설정) 1회 경고
+    origin = websocket.headers.get('origin')
+    if not ws_origin.is_allowed_origin(origin):
+        logger.warning('WS 연결 거절: 허용되지 않은 Origin (origin=%r)', origin)
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+
+    # ② 티켓 소비 — 1회용 입장권으로 user_id 확정(없거나 무효·만료·재사용이면 거절).
     user_id = ws_ticket.consume_ticket(websocket.query_params.get('ticket'))
     if user_id is None:
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
