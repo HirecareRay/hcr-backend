@@ -79,14 +79,14 @@ class LandmarkFrameMessage(BaseModel):
 
 
 class EventSnapshotMessage(BaseModel):
-    """이벤트 발생 시 증거 스냅샷 (시선이탈·무표정 등).
+    """이벤트 발생 시 신호 (시선이탈·무표정 등) — 이벤트 종류·메타만 수신 (이미지 미수신).
 
-    image 는 base64 data URL 또는 업로드 URL. meta 는 이벤트별 부가 정보.
+    event 는 이벤트 종류, meta 는 이벤트별 부가 정보. 집계는 event 횟수만 사용하므로
+    얼굴 스냅샷 이미지는 받지 않는다(대역폭·프라이버시).
     """
 
     type: Literal['event_snapshot'] = 'event_snapshot'
     event: str
-    image: str
     meta: dict[str, Any] = Field(default_factory=dict)
 
 
