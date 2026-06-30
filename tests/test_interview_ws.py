@@ -436,7 +436,7 @@ def test_ws_accumulated_landmarks_reflected_in_summary(monkeypatch):
         ws.send_json({'type': 'control', 'action': 'answer_start'})
         for _ in range(5):
             ws.send_json({'type': 'landmark_frame', 'gaze_x': 0.95})  # 시선 이탈
-        ws.send_json({'type': 'event_snapshot', 'event': 'gaze_away', 'image': 'data:,'})
+        ws.send_json({'type': 'event_snapshot', 'event': 'gaze_away'})
         ws.send_bytes(b'audio')
         ws.send_json({'type': 'control', 'action': 'answer_end'})
         _drain(ws, 2)  # transcript + eval

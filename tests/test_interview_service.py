@@ -264,7 +264,7 @@ def test_build_summary_clamps_score_to_zero(monkeypatch):
     )
     frames = tuple(LandmarkFrameMessage(gaze_x=1.0) for _ in range(10))
     events = tuple(
-        EventSnapshotMessage(event='gaze_away', image='data:,') for _ in range(50)
+        EventSnapshotMessage(event='gaze_away') for _ in range(50)
     )
     metrics = nonverbal.aggregate(frames, events)
     summary = asyncio.run(service.build_summary((), metrics))
