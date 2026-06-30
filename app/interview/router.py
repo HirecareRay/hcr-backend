@@ -57,8 +57,8 @@ _ticket_auth_error = HTTPException(
     headers={'WWW-Authenticate': 'Bearer'},
 )
 
-# 비언어 누적 상한 — 집계는 통계라 최근 N개면 충분하다. 긴 세션에서 무한 누적·
-# tuple 복사 비용(특히 event_snapshot 의 base64 image)을 막는 방어선이다.
+# 비언어 누적 상한 — 집계는 통계라 최근 N개면 충분하다. 긴 세션에서 이벤트 메시지가
+# 무한 누적되는 것을 막는 방어선이다.
 _MAX_LANDMARKS = 1200  # ~20분 @ 1s
 _MAX_EVENTS = 500
 _MAX_VOICE = 1200  # ~20분 @ 1s (landmark 와 동일 주기)
