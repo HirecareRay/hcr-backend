@@ -43,22 +43,33 @@ async def build_main_questions(
     *,
     company_id: str | None = None,
     user_id: str | None = None,
+    job_title: str | None = None,
     db: object | None = None,
     mongo: object | None = None,
 ) -> list[str]:
-    """회사·지원자 컨텍스트로 메인 질문을 생성한다(LLM 실패·개수 부족 시 기본 질문 보충).
+    """회사·지원자·직무 컨텍스트로 메인 질문을 생성한다(있는 데이터만큼만 개인화).
 
     company_id·db·mongo 가 주어지면 실제 회사 분석을, user_id·mongo 가 주어지면
-    지원자 이력서·포트폴리오를 컨텍스트에 합쳐 개인화 질문을 만든다. 식별자가 없거나
-    조회에 실패하면 mock 회사 컨텍스트·빈 지원자 정보로 우회한다(데모·테스트 보호).
+    지원자 문서 4종을, job_title 이 오면 지원 직무를 컨텍스트에 합쳐 개인화 질문을
+    만든다. 셋 다 비면(회사·지원자·직무 모두 없음) LLM 을 호출하지 않고 곧장 기본
+    질문으로 폴백한다 — 불필요한 OpenAI 비용·지연을 막는다. 하나라도 있으면 있는
+    것만으로 개인화하고, 개수가 부족하면 기본 질문으로 보충한다.
     """
     company_context = await context.get_company_context(
         db=db, mongo=mongo, company_id=company_id
     )
     user_context = await context.get_user_context(mongo=mongo, user_id=user_id)
+    # 직무명은 쿼리스트링으로 들어오는 유일한 무제한 자유 텍스트라 길이를 캡한다 —
+    # 빌린 OpenAI 키 비용 남용(거대한 jobTitle 로 프롬프트 토큰 증폭)을 막는 방어선.
+    job = (job_title or '').strip()[:100]
+
+    # 빈 컨텍스트 단축 경로 — 회사·지원자·직무가 모두 없으면 LLM 없이 기본 질문.
+    if not company_context and not user_context and not job:
+        return _ensure_question_count([], count)
+
     try:
         questions = await llm.generate_main_questions(
-            company_context, user_context, count
+            company_context, user_context, job, count
         )
     except RuntimeError as error:
         logger.error('메인 질문 생성 실패, 기본 질문 사용: %s', error)
