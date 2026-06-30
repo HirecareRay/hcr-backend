@@ -35,7 +35,7 @@ def test_transcribe_empty_returns_empty_without_api(monkeypatch):
 
 
 def test_transcribe_calls_openai_and_returns_text(monkeypatch):
-    """누적 오디오를 whisper-1 로 전사하고 텍스트를 다듬어 반환."""
+    """누적 오디오를 gpt-4o-mini-transcribe 로 전사하고 텍스트를 다듬어 반환."""
     create = AsyncMock(return_value=SimpleNamespace(text='  안녕하세요  '))
     monkeypatch.setattr(stt, '_get_client', lambda: _fake_client(create))
 
@@ -44,7 +44,7 @@ def test_transcribe_calls_openai_and_returns_text(monkeypatch):
     assert text == '안녕하세요'
     create.assert_awaited_once()
     kwargs = create.await_args.kwargs
-    assert kwargs['model'] == 'whisper-1'  # 이 키가 접근 가능한 전사 모델
+    assert kwargs['model'] == 'gpt-4o-mini-transcribe'  # 이 키가 접근 가능한 전사 모델
     assert kwargs['file'].name.endswith('.webm')  # 포맷을 파일명으로 알림
 
 

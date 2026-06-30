@@ -335,3 +335,45 @@ def build_company_report(db: Session, mongo: Database, company_id: str) -> dict:
         "insight": insight,
         "generatedAt": _s(_a("generated_at")) or "",
     }
+
+
+# ── 면접 컨텍스트 ──────────────────────────────────────────────────────
+def build_interview_context(db: Session, mongo: Database, company_id: str) -> str:
+    """면접관 LLM 에 주입할 간결한 회사 컨텍스트 문자열을 만든다.
+
+    build_company_report 의 8섹션 중 질문 생성에 쓸모 있는 요약 필드(업종·사업개요·
+    인재상·재무/성장 요약·뉴스·채용공고·SWOT 강점)만 추려 텍스트로 직렬화한다 —
+    전체 리포트는 너무 길어 프롬프트 토큰을 낭비한다. 회사가 없으면 CompanyNotFound.
+    """
+    report = build_company_report(db, mongo, company_id)
+    company = report["company"]
+    overview = report["overview"]
+    insight = report["insight"]
+
+    lines: list[str] = [f"회사명: {company['name']}"]
+    _append_line(lines, "업종", company.get("industry"))
+    _append_line(lines, "사업 개요", overview.get("businessDescription"))
+    _append_joined(lines, "핵심 포인트", insight.get("keyPoints"))
+    _append_line(lines, "재무 요약", report["financial"].get("summary"))
+    _append_line(lines, "성장성 요약", report["growth"].get("summary"))
+    news_titles = [n.get("title") for n in report["growth"].get("news") or []]
+    _append_joined(lines, "최근 뉴스", news_titles)
+    opening_titles = [j.get("title") for j in report["hiring"].get("openings") or []]
+    _append_joined(lines, "채용 중 포지션", opening_titles)
+    _append_joined(lines, "강점(SWOT)", insight.get("swot", {}).get("strengths"))
+
+    return "\n".join(lines)
+
+
+def _append_line(lines: list[str], label: str, value: Any) -> None:
+    """값이 비어 있지 않을 때만 'label: value' 한 줄을 추가한다."""
+    text = _s(value).strip()
+    if text:
+        lines.append(f"{label}: {text}")
+
+
+def _append_joined(lines: list[str], label: str, values: Any, limit: int = 5) -> None:
+    """리스트에서 빈 값을 거른 뒤 상위 limit 개를 ' / ' 로 이어 한 줄로 추가한다."""
+    items = [_s(v).strip() for v in (values or []) if _s(v).strip()]
+    if items:
+        lines.append(f"{label}: " + " / ".join(items[:limit]))
