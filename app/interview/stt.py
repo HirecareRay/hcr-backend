@@ -4,10 +4,10 @@
 유일한 OpenAI 경계이므로, 테스트는 여기를 mock 해 실 API 를 호출하지 않는다.
 
 ⚠️ 비용 주의: OPENAI_API_KEY 는 강사님 대여분이다. 빈 입력은 호출조차 하지 않는다.
-모델은 whisper-1 로 고정한다 — 이 키 프로젝트는 gpt-4o-mini-transcribe·realtime
-전사 모델 접근 권한이 없고(403 model_not_found), 접근 가능한 전사 모델이
-whisper-1 뿐이라 확인됨. whisper-1 은 $0.006/분(완성 파일 ≤25MB, 스트리밍 불가).
-실시간 부분결과(Realtime API)는 키 권한이 풀리면 Phase 2.5 에서 교체한다.
+모델은 gpt-4o-mini-transcribe 로 고정한다 — 이 키 프로젝트는 gpt-4o-mini 와
+gpt-4o-mini-transcribe 두 모델만 접근 권한이 열려 있다(2026-06-28 키 교체).
+이전에 쓰던 whisper-1 은 이제 403 model_not_found 로 막혔다. 기본 전사 API 는
+완성 파일 단위 전사다(실시간 부분결과는 Realtime API 별도, Phase 2.5).
 """
 
 import io
@@ -19,8 +19,8 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
-# 이 키가 접근 가능한 유일한 전사 모델(상단 주석 참고). 변경은 키 권한 확인 후.
-_STT_MODEL = 'whisper-1'
+# 이 키가 접근 가능한 전사 모델(상단 주석 참고). 변경은 키 권한 확인 후.
+_STT_MODEL = 'gpt-4o-mini-transcribe'
 # 누적 webm/opus 컨테이너. 파일명 확장자로 OpenAI 에 포맷을 알린다.
 _AUDIO_FILENAME = 'answer.webm'
 

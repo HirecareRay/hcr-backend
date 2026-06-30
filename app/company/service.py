@@ -110,6 +110,40 @@ def search_companies(mongo: Database, q: str, limit: int = 20) -> list[dict]:
     } for c in repository.search_companies(mongo, rx, limit)]
 
 
+def search_company_jobs(mongo: Database, q: str, limit: int = 20) -> list[dict]:
+    """검색 결과 회사들의 채용공고 — /search 페이지 '연관 채용공고'용.
+
+    q 매칭 회사들 → 그 회사들의 job_postings → 카드용 평탄 리스트.
+    """
+    q = (q or "").strip()
+    if not q:
+        return []
+    rx = {"$regex": re.escape(q), "$options": "i"}
+    companies = repository.search_companies(mongo, rx, limit)
+    ids = [str(c["_id"]) for c in companies]
+    jobs = repository.find_jobs_by_company_ids(mongo, ids, limit)
+    return [_related_job(j) for j in jobs]
+
+
+def _related_job(j: dict) -> dict:
+    """job_postings 문서 → 연관공고 카드(RelatedJobPosting) 형태."""
+    wc = j.get("work_conditions") or {}
+    dtype = _s(wc.get("deadline_type"))
+    deadline_raw = wc.get("deadline")
+    if dtype == "rolling" or not deadline_raw:
+        deadline = "상시채용"
+    else:
+        deadline = f"{str(deadline_raw).replace('-', '.')} 마감"
+    return {
+        "id": str(j["_id"]),
+        "companyName": _s(j.get("company_name")),
+        "title": _s(j.get("posting_title")),
+        "url": _s(j.get("source_url")),
+        "employmentType": _s(wc.get("employment_type")),
+        "deadline": deadline,
+    }
+
+
 def get_company(mongo: Database, company_id: str) -> dict:
     """회사 기본정보 1건(_id 문자열화). 없으면 CompanyNotFound."""
     doc = repository.find_company(mongo, company_id)
@@ -132,7 +166,7 @@ def build_company_report(db: Session, mongo: Database, company_id: str) -> dict:
     jp_count, jp_avg = repository.jobplanet_aggregate(db, company_id)
     jp_rows = repository.find_reviews(db, company_id)
     news_rows = repository.find_news(db, company_id)
-    job_rows = repository.find_jobs(db, company_id)
+    job_rows = repository.find_jobs(mongo, company_id)
     sim_ids = repository.find_similar_ids(db, company_id)
 
     def _a(name: str):  # analysis 속성(없으면 None)
@@ -230,19 +264,39 @@ def build_company_report(db: Session, mongo: Database, company_id: str) -> dict:
         } for n in news_rows],
     }
 
-    # ── hiring (공고 카드 — 상세는 빈값) ──
-    def _empty_job():
-        return {"name": "", "headcount": "", "locations": [], "responsibilities": [],
-                "requirements": [], "preferred": []}
-    openings = [{
-        "id": _s(j.id), "companyName": _s(j.company_name),
-        "title": _s(j.posting_title), "url": _s(j.source_url),
-        "job": _empty_job(),
-        "qualification": {"education": "", "major": "", "documents": []},
-        "process": [],
-        "workConditions": {"employmentType": "", "workType": "", "salary": "",
-                           "benefits": [], "deadline": None, "deadlineType": ""},
-    } for j in job_rows]   # ponytail: 상세는 job_postings 리치 재적재 시 채움
+    # ── hiring (공고 카드 — Mongo job_postings 리치) ──
+    def _opening(j: dict) -> dict:
+        jobs = j.get("jobs") or []
+        jb = jobs[0] if jobs else {}        # 카드는 대표 직무 1건 (ponytail)
+        tracks = jb.get("tracks") or {}
+        track = tracks.get("experienced") or tracks.get("newcomer") or {}
+        common = j.get("common") or {}
+        wc = j.get("work_conditions") or {}
+        return {
+            "id": _s(j.get("_id")), "companyName": _s(j.get("company_name")),
+            "title": _s(j.get("posting_title")), "url": _s(j.get("source_url")),
+            "job": {
+                "name": _s(jb.get("job_name")), "headcount": _s(jb.get("headcount")),
+                "locations": jb.get("locations") or [],
+                "responsibilities": jb.get("responsibilities") or [],
+                "requirements": track.get("requirements") or [],
+                "preferred": jb.get("preferred_common") or track.get("preferred") or [],
+            },
+            "qualification": {
+                "education": _s(common.get("education") or jb.get("education")),
+                "major": _s(common.get("major") or jb.get("major")),
+                "documents": common.get("documents") or [],
+            },
+            "process": j.get("process") or [],
+            "workConditions": {
+                "employmentType": _s(wc.get("employment_type")),
+                "workType": _s(wc.get("work_type")), "salary": _s(wc.get("salary")),
+                "benefits": wc.get("benefits") or [],
+                "deadline": wc.get("deadline") or None,
+                "deadlineType": _s(wc.get("deadline_type")),
+            },
+        }
+    openings = [_opening(j) for j in job_rows]
     hiring = {"summary": "", "openings": openings}
 
     # ── insight (swot/key_points + 유사기업) ──
@@ -281,3 +335,45 @@ def build_company_report(db: Session, mongo: Database, company_id: str) -> dict:
         "insight": insight,
         "generatedAt": _s(_a("generated_at")) or "",
     }
+
+
+# ── 면접 컨텍스트 ──────────────────────────────────────────────────────
+def build_interview_context(db: Session, mongo: Database, company_id: str) -> str:
+    """면접관 LLM 에 주입할 간결한 회사 컨텍스트 문자열을 만든다.
+
+    build_company_report 의 8섹션 중 질문 생성에 쓸모 있는 요약 필드(업종·사업개요·
+    인재상·재무/성장 요약·뉴스·채용공고·SWOT 강점)만 추려 텍스트로 직렬화한다 —
+    전체 리포트는 너무 길어 프롬프트 토큰을 낭비한다. 회사가 없으면 CompanyNotFound.
+    """
+    report = build_company_report(db, mongo, company_id)
+    company = report["company"]
+    overview = report["overview"]
+    insight = report["insight"]
+
+    lines: list[str] = [f"회사명: {company['name']}"]
+    _append_line(lines, "업종", company.get("industry"))
+    _append_line(lines, "사업 개요", overview.get("businessDescription"))
+    _append_joined(lines, "핵심 포인트", insight.get("keyPoints"))
+    _append_line(lines, "재무 요약", report["financial"].get("summary"))
+    _append_line(lines, "성장성 요약", report["growth"].get("summary"))
+    news_titles = [n.get("title") for n in report["growth"].get("news") or []]
+    _append_joined(lines, "최근 뉴스", news_titles)
+    opening_titles = [j.get("title") for j in report["hiring"].get("openings") or []]
+    _append_joined(lines, "채용 중 포지션", opening_titles)
+    _append_joined(lines, "강점(SWOT)", insight.get("swot", {}).get("strengths"))
+
+    return "\n".join(lines)
+
+
+def _append_line(lines: list[str], label: str, value: Any) -> None:
+    """값이 비어 있지 않을 때만 'label: value' 한 줄을 추가한다."""
+    text = _s(value).strip()
+    if text:
+        lines.append(f"{label}: {text}")
+
+
+def _append_joined(lines: list[str], label: str, values: Any, limit: int = 5) -> None:
+    """리스트에서 빈 값을 거른 뒤 상위 limit 개를 ' / ' 로 이어 한 줄로 추가한다."""
+    items = [_s(v).strip() for v in (values or []) if _s(v).strip()]
+    if items:
+        lines.append(f"{label}: " + " / ".join(items[:limit]))
