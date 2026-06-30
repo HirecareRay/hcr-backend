@@ -79,19 +79,54 @@ class LandmarkFrameMessage(BaseModel):
 
 
 class EventSnapshotMessage(BaseModel):
-    """이벤트 발생 시 증거 스냅샷 (시선이탈·무표정 등).
+    """이벤트 발생 시 신호 (시선이탈·무표정 등) — 이벤트 종류·메타만 수신 (이미지 미수신).
 
-    image 는 base64 data URL 또는 업로드 URL. meta 는 이벤트별 부가 정보.
+    event 는 이벤트 종류, meta 는 이벤트별 부가 정보. 집계는 event 횟수만 사용하므로
+    얼굴 스냅샷 이미지는 받지 않는다(대역폭·프라이버시).
     """
 
     type: Literal['event_snapshot'] = 'event_snapshot'
     event: str
-    image: str
     meta: dict[str, Any] = Field(default_factory=dict)
 
 
+class TextAnswerMessage(BaseModel):
+    """텍스트 모드 답변 (타이핑) — 음성 대신 직접 입력한 답변 본문.
+
+    answer_end 시 이 텍스트를 답변으로 사용한다(오디오 전사 대체).
+    """
+
+    type: Literal['text_answer'] = 'text_answer'
+    text: str
+
+
+class VoiceMetricMessage(BaseModel):
+    """클라이언트 Web Audio API 가 추출한 음성 물리지표 (주기 ~1s, 답변 중 연속).
+
+    서버 직접 추론(Whisper·SER)은 운영 EC2(t3a.medium, GPU 없음)에서 OOM 위험이라,
+    데시벨·피치·말속도·떨림 같은 *물리 지표*만 브라우저에서 뽑아 올려보낸다. "감정"을
+    단정하지 않고 **발화 안정도 지표**로만 쓴다(가짜 감정 라벨을 만들지 않는다).
+
+    모든 필드는 선택 — 클라이언트가 추출 가능한 지표만 채워 보낸다. 결측은 집계에서
+    제외한다(landmark_frame 과 동일 철학). 단위: decibel(dB), pitch(Hz),
+    speech_rate(WPM, 분당 단어), tremor(0~1 떨림 정도).
+    """
+
+    type: Literal['voice_metric'] = 'voice_metric'
+    decibel: float | None = None
+    pitch: float | None = None
+    speech_rate: float | None = None
+    tremor: float | None = None
+
+
 UpstreamMessage = Annotated[
-    Union[ControlMessage, LandmarkFrameMessage, EventSnapshotMessage],
+    Union[
+        ControlMessage,
+        LandmarkFrameMessage,
+        EventSnapshotMessage,
+        TextAnswerMessage,
+        VoiceMetricMessage,
+    ],
     Field(discriminator='type'),
 ]
 """업스트림 JSON 메시지 union. audio_chunk(binary)는 제외 — 파일 상단 주석 참고."""
@@ -107,6 +142,8 @@ class QuestionEvent(CamelModel):
     question_id: str
     text: str
     tts_text: str | None = None
+    # 메인(기본) 질문인지 직전 답변 기반 꼬리질문인지 — 프론트 배지·흐름 표시용.
+    kind: Literal['main', 'follow_up'] = 'main'
 
 
 class TranscriptDeltaEvent(CamelModel):
@@ -142,3 +179,13 @@ DownstreamEvent = Annotated[
     Field(discriminator='type'),
 ]
 """다운스트림 이벤트 union. CamelModel 직렬화(by_alias=True)로 프론트에 내려간다."""
+
+
+# ── WS 입장 티켓 (HTTP 응답, CamelModel: snake→camel) ───────────────
+
+
+class WsTicketOut(CamelModel):
+    """POST /interviews/ws-ticket 응답 — 면접 WS 입장용 단기 1회용 티켓."""
+
+    ticket: str
+    expires_in: int  # → JSON: "expiresIn" (초)

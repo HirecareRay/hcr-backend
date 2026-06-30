@@ -12,6 +12,7 @@ import logging
 import math
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from typing import Literal
 
 from app.interview import context, dummy_transcript, llm, nonverbal, stt
 from app.interview.nonverbal import NonverbalMetrics
@@ -31,18 +32,54 @@ _SCORE_MAX = 100.0
 
 @dataclass(frozen=True)
 class Turn:
-    """한 번의 질문-답변-평가 기록. 꼬리질문·요약의 입력이 된다."""
+    """한 번의 질문-답변-평가 기록. 꼬리질문·요약·결과 스크립트의 입력이 된다.
+
+    category 는 결과 스크립트(ScriptItem.category)용 분류 폴백값이다. WS 진행 경로는
+    질문의 분류를 모르므로 기본 'common' 으로 둔다 — 실제 company/job/common 분류는
+    결과 조립 시 LLM 이 질문 텍스트를 보고 후분류한다(result_builder 가 LLM 분류를
+    우선 적용하고, 없으면 이 값으로 폴백). 추후 메인 질문 생성 시 태깅을 붙이면 그
+    값이 폴백으로 쓰인다.
+    """
 
     question: str
     answer: str
     evaluation: str
+    category: str = 'common'
 
 
-async def build_main_questions(count: int) -> list[str]:
-    """회사 컨텍스트로 메인 질문을 생성한다(LLM 실패·개수 부족 시 기본 질문으로 보충)."""
-    company_context = await context.get_company_context()
+async def build_main_questions(
+    count: int,
+    *,
+    company_id: str | None = None,
+    user_id: str | None = None,
+    job_title: str | None = None,
+    db: object | None = None,
+    mongo: object | None = None,
+) -> list[str]:
+    """회사·지원자·직무 컨텍스트로 메인 질문을 생성한다(있는 데이터만큼만 개인화).
+
+    company_id·db·mongo 가 주어지면 실제 회사 분석을, user_id·mongo 가 주어지면
+    지원자 문서 4종을, job_title 이 오면 지원 직무를 컨텍스트에 합쳐 개인화 질문을
+    만든다. 셋 다 비면(회사·지원자·직무 모두 없음) LLM 을 호출하지 않고 곧장 기본
+    질문으로 폴백한다 — 불필요한 OpenAI 비용·지연을 막는다. 하나라도 있으면 있는
+    것만으로 개인화하고, 개수가 부족하면 기본 질문으로 보충한다.
+    """
+    company_context = await context.get_company_context(
+        db=db, mongo=mongo, company_id=company_id
+    )
+    user_context = await context.get_user_context(mongo=mongo, user_id=user_id)
+    # 직무명은 쿼리스트링으로 들어오는 유일한 무제한 자유 텍스트라 길이를 캡한다 —
+    # 빌린 OpenAI 키 비용 남용(거대한 jobTitle 로 프롬프트 토큰 증폭)을 막는 방어선.
+    job = (job_title or '').strip()[:100]
+
+    # 빈 컨텍스트 단축 경로 — 회사·지원자·직무가 모두 없으면 LLM 없이 기본 질문.
+    if not company_context and not user_context and not job:
+        return _ensure_question_count([], count)
+
     try:
-        questions = await llm.generate_main_questions(company_context, count)
+        questions = await llm.generate_main_questions(
+            company_context, user_context, job, count
+        )
     except RuntimeError as error:
         logger.error('메인 질문 생성 실패, 기본 질문 사용: %s', error)
         questions = []
@@ -64,9 +101,16 @@ def _ensure_question_count(questions: list[str], count: int) -> list[str]:
     return filled[:count]
 
 
-def question_event(question_id: str, text: str) -> QuestionEvent:
-    """질문 문자열을 다운스트림 이벤트로 감싼다(TTS 텍스트는 동일)."""
-    return QuestionEvent(question_id=question_id, text=text, tts_text=text)
+def question_event(
+    question_id: str, text: str, kind: Literal['main', 'follow_up'] = 'main'
+) -> QuestionEvent:
+    """질문 문자열을 다운스트림 이벤트로 감싼다(TTS 텍스트는 동일).
+
+    kind 는 메인(기본) 질문인지 꼬리질문인지 — 프론트가 흐름을 표시하는 데 쓴다.
+    """
+    return QuestionEvent(
+        question_id=question_id, text=text, tts_text=text, kind=kind
+    )
 
 
 async def transcribe_answer(audio: bytes) -> TranscriptDeltaEvent | None:
@@ -75,6 +119,61 @@ async def transcribe_answer(audio: bytes) -> TranscriptDeltaEvent | None:
     if not text:
         return None
     return TranscriptDeltaEvent(delta=text, is_final=True)
+
+
+def _suffix_delta(previous: str, full: str) -> str:
+    """이전에 흘려보낸 자막(previous) 뒤로 새로 늘어난 부분만 반환한다.
+
+    누적 버퍼를 통째로 재전사하면 매번 전체 텍스트가 나오므로, 이미 보낸
+    부분을 빼고 새 꼬리만 부분 자막으로 흘린다(프론트는 delta 를 이어 붙인다).
+    재전사로 앞부분이 바뀐 드문 경우엔 공통 접두 이후를 보낸다(약간의 글리치 허용).
+    """
+    if not previous:
+        return full
+    if full.startswith(previous):
+        return full[len(previous):]
+    common = 0
+    for prev_char, full_char in zip(previous, full):
+        if prev_char != full_char:
+            break
+        common += 1
+    return full[common:]
+
+
+async def transcribe_partial(
+    audio: bytes, previous: str
+) -> TranscriptDeltaEvent | None:
+    """누적 버퍼를 재전사해 이전 자막 뒤 새 부분만 부분 자막(isFinal=False)으로 만든다.
+
+    답변 중 주기적으로 호출된다. 전사 실패·새 내용 없음이면 None 을 돌려
+    라우터가 건너뛰게 한다 — 부분 전사 실패가 답변 진행을 막지 않는다(데모 보호).
+    """
+    try:
+        full = await stt.transcribe_audio(audio)
+    except RuntimeError as error:
+        logger.error('부분 전사 실패(건너뜀): %s', error)
+        return None
+    delta = _suffix_delta(previous, full)
+    return TranscriptDeltaEvent(delta=delta, is_final=False) if delta else None
+
+
+async def finalize_partial(
+    audio: bytes, previous: str
+) -> tuple[str, TranscriptDeltaEvent]:
+    """부분 자막 모드의 answer_end 마무리 — 최종 전사 후 (답변본문, 종료 자막)을 반환.
+
+    누적 버퍼를 한 번 더 전사해 권위 있는 전체 텍스트를 답변으로 쓰고, 이미 흘린
+    부분 자막 뒤 남은 꼬리만 final(isFinal=True) 로 보낸다. 전사 실패·빈 결과면
+    그동안 흘린 부분 자막(previous)을 답변으로 쓰고 종료 마커만 보낸다(끊김 방지).
+    """
+    try:
+        full = await stt.transcribe_audio(audio)
+    except RuntimeError as error:
+        logger.error('최종 전사 실패, 부분 자막을 답변으로 사용: %s', error)
+        full = ''
+    if not full:
+        return previous, TranscriptDeltaEvent(delta='', is_final=True)
+    return full, TranscriptDeltaEvent(delta=_suffix_delta(previous, full), is_final=True)
 
 
 def dummy_transcript_partial(index: int) -> TranscriptDeltaEvent:
@@ -88,6 +187,15 @@ def dummy_transcript_partial(index: int) -> TranscriptDeltaEvent:
 def transcript_final() -> TranscriptDeltaEvent:
     """자막 종료 마커(isFinal=True, 추가 토큰 없음) — 캡션을 닫는 신호."""
     return TranscriptDeltaEvent(delta='', is_final=True)
+
+
+def text_answer_transcript(text: str) -> TranscriptDeltaEvent:
+    """타이핑 답변을 최종 자막으로 감싼다.
+
+    평가·요약 입력(답변 본문)과 화면 자막의 출처를 하나로 맞춘다 — 텍스트 모드도
+    음성 모드와 동일하게 자막(final)이 흐른 뒤 평가가 스트리밍되게 한다.
+    """
+    return TranscriptDeltaEvent(delta=text, is_final=True)
 
 
 def dummy_answer_text(chunk_count: int) -> str:
@@ -135,7 +243,7 @@ async def build_summary(
     LLM 요약 실패 시 안전 기본 요약으로 우회하고, 비언어 지표가 없으면(metrics
     None·빈 집계) 언어 평가만으로 요약한다 — 어느 쪽이 비어도 면접이 끊기지 않는다.
     """
-    transcript = _format_history(history)
+    transcript = format_history(history)
     try:
         data = await llm.generate_summary(transcript)
     except RuntimeError as error:
@@ -144,8 +252,8 @@ async def build_summary(
     return _summary_event(data, metrics or NonverbalMetrics())
 
 
-def _format_history(history: tuple[Turn, ...]) -> str:
-    """누적 턴을 LLM 요약 입력용 텍스트로 직렬화한다."""
+def format_history(history: tuple[Turn, ...]) -> str:
+    """누적 턴을 LLM 요약·리포트 입력용 텍스트로 직렬화한다(요약·결과 공용 공개 헬퍼)."""
     blocks = [
         f'Q{i}: {turn.question}\nA{i}: {turn.answer}\n평가{i}: {turn.evaluation}'
         for i, turn in enumerate(history, start=1)

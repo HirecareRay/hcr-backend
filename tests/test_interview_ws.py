@@ -15,13 +15,34 @@ lifespan 을 띄우지 않는 TestClient 를 그대로 쓴다.
 from collections.abc import AsyncIterator
 from unittest.mock import AsyncMock, Mock
 
+import pytest
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 from app.core.config import settings
-from app.interview import llm, nonverbal, stt
+from app.interview import context, llm, nonverbal, router, service, stt, ws_ticket
 from app.main import app
 
 client = TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def _clear_ticket_store():
+    """테스트 간 티켓 저장소 격리 — 누수된 티켓이 다른 테스트에 영향 주지 않게."""
+    ws_ticket.clear()
+    yield
+    ws_ticket.clear()
+
+
+def _ws_url(session_id: str = 's1', **params: str) -> str:
+    """유효한 1회용 티켓을 발급해 인증된 WS 접속 URL 을 만든다.
+
+    면접 WS 는 로그인(유효 티켓) 전용이라, 면접 루프를 검증하는 테스트는 매 연결마다
+    새 티켓이 필요하다. user_id 는 기본 '42'. companyId 등은 키워드로 덧붙인다.
+    """
+    ticket, _ = ws_ticket.issue_ticket('42', ttl_seconds=60)
+    query = '&'.join(f'{key}={value}' for key, value in {**params, 'ticket': ticket}.items())
+    return f'/interviews/ws/{session_id}?{query}'
 
 
 def _drain(ws, count: int) -> None:
@@ -53,8 +74,17 @@ def _patch_llm(
 
     더미 자막 플래그는 명시적으로 끈다 — 이 헬퍼를 쓰는 테스트는 실 STT 경로
     (answer_end 통전사) 를 검증하므로, 환경변수 누수로 더미가 켜져도 영향받지 않게 한다.
+
+    회사 컨텍스트도 비어 있지 않게 스텁한다 — 그래야 build_main_questions 가 빈
+    컨텍스트 단축 경로(LLM 미호출, 기본질문 폴백)를 타지 않고 mock LLM 으로 들어가
+    WS 파이프라인(질문 흐름)을 검증할 수 있다.
     """
     monkeypatch.setattr(settings, 'interview_dummy_transcript', False)
+
+    async def _stub_company(*args, **kwargs):
+        return '회사 컨텍스트'
+
+    monkeypatch.setattr(context, 'get_company_context', _stub_company)
     monkeypatch.setattr(
         llm,
         'generate_main_questions',
@@ -75,7 +105,7 @@ def _patch_llm(
 def test_ws_sends_generated_main_question_on_connect(monkeypatch):
     _patch_llm(monkeypatch, main_questions=['자기소개를 부탁드립니다', '강점은?'])
 
-    with client.websocket_connect('/interviews/ws/s1') as ws:
+    with client.websocket_connect(_ws_url()) as ws:
         data = ws.receive_json()
 
     assert data['type'] == 'question'
@@ -84,10 +114,145 @@ def test_ws_sends_generated_main_question_on_connect(monkeypatch):
     assert data['ttsText'] == '자기소개를 부탁드립니다'  # camelCase 직렬화 확인
 
 
+def test_ws_connect_with_company_id_still_returns_first_question(monkeypatch):
+    """유효 티켓+companyId 쿼리를 받아도 DB 미연결 환경에선 기본 질문으로 첫 질문이 나온다."""
+    _patch_llm(monkeypatch, main_questions=['자기소개를 부탁드립니다', '강점은?'])
+
+    with client.websocket_connect(_ws_url(companyId='abc123')) as ws:
+        data = ws.receive_json()
+
+    assert data['type'] == 'question'
+    assert data['questionId'] == 'm0'
+
+
+def test_ws_ticket_endpoint_issues_ticket_with_valid_bearer(monkeypatch):
+    """Bearer JWT 가 유효하면 200 + {ticket, expiresIn} 를 발급한다."""
+    monkeypatch.setattr(router, 'decode_access_token', lambda token: '42')
+
+    res = client.post(
+        '/interviews/ws-ticket',
+        headers={'Authorization': 'Bearer good-token'},
+    )
+
+    assert res.status_code == 200
+    body = res.json()
+    assert isinstance(body['ticket'], str) and body['ticket']
+    assert body['expiresIn'] == settings.interview_ws_ticket_ttl_seconds
+
+
+def test_ws_ticket_endpoint_rejects_missing_bearer():
+    """Authorization 헤더가 없으면 401."""
+    assert client.post('/interviews/ws-ticket').status_code == 401
+
+
+def test_ws_ticket_endpoint_rejects_invalid_jwt(monkeypatch):
+    """JWT 가 무효면 401 (티켓 발급 거부)."""
+    import jwt
+
+    def _raise(token):
+        raise jwt.InvalidTokenError('bad')
+
+    monkeypatch.setattr(router, 'decode_access_token', _raise)
+
+    res = client.post(
+        '/interviews/ws-ticket',
+        headers={'Authorization': 'Bearer bad-token'},
+    )
+    assert res.status_code == 401
+
+
+def test_ws_ticket_personalizes_and_is_consumed(monkeypatch):
+    """유효 티켓+companyId 면 그 user_id 가 질문 생성에 주입되고, 티켓은 1회용으로 폐기된다."""
+    _patch_llm(monkeypatch, main_questions=['자기소개를 부탁드립니다', '강점은?'])
+    captured: dict[str, object] = {}
+
+    async def _capture(
+        count, *, company_id=None, user_id=None, job_title=None, db=None, mongo=None
+    ):
+        captured['company_id'] = company_id
+        captured['user_id'] = user_id
+        return ['자기소개를 부탁드립니다', '강점은?']
+
+    monkeypatch.setattr(service, 'build_main_questions', _capture)
+
+    ticket, _ = ws_ticket.issue_ticket('42', ttl_seconds=60)
+    url = f'/interviews/ws/s1?companyId=6a3ca079d7da326c0781963c&ticket={ticket}'
+    with client.websocket_connect(url) as ws:
+        ws.receive_json()
+
+    assert captured['user_id'] == '42'
+    assert captured['company_id'] == '6a3ca079d7da326c0781963c'
+    # 1회용 — 같은 티켓을 다시 소비하면 None(폐기됨)
+    assert ws_ticket.consume_ticket(ticket) is None
+
+
+def test_ws_passes_job_title_query_to_question_builder(monkeypatch):
+    """jobTitle 쿼리(URL 인코딩)가 디코딩돼 질문 생성에 그대로 전달된다."""
+    _patch_llm(monkeypatch, main_questions=['자기소개를 부탁드립니다', '강점은?'])
+    captured: dict[str, object] = {}
+
+    async def _capture(
+        count, *, company_id=None, user_id=None, job_title=None, db=None, mongo=None
+    ):
+        captured['job_title'] = job_title
+        return ['자기소개를 부탁드립니다', '강점은?']
+
+    monkeypatch.setattr(service, 'build_main_questions', _capture)
+
+    ticket, _ = ws_ticket.issue_ticket('42', ttl_seconds=60)
+    url = f'/interviews/ws/s1?jobTitle=%EB%B0%B1%EC%97%94%EB%93%9C%20%EA%B0%9C%EB%B0%9C%EC%9E%90&ticket={ticket}'
+    with client.websocket_connect(url) as ws:
+        ws.receive_json()
+
+    assert captured['job_title'] == '백엔드 개발자'
+
+
+def test_ws_rejects_connection_without_ticket(monkeypatch):
+    """티켓이 없으면 연결을 거절한다(로그인 전용) — 질문 생성·과금 경로에 닿지 않는다."""
+    build = AsyncMock(return_value=['자기소개를 부탁드립니다'])
+    monkeypatch.setattr(service, 'build_main_questions', build)
+
+    with pytest.raises(WebSocketDisconnect) as exc:
+        with client.websocket_connect('/interviews/ws/s1') as ws:
+            ws.receive_json()
+
+    assert exc.value.code == 1008  # 정책 위반
+    build.assert_not_awaited()  # 인증 실패 시 LLM·DB 경로 진입 금지
+
+
+def test_ws_rejects_invalid_ticket(monkeypatch):
+    """무효 티켓이면 연결을 거절한다 — 위조·오타·재사용 우회."""
+    build = AsyncMock(return_value=['자기소개를 부탁드립니다'])
+    monkeypatch.setattr(service, 'build_main_questions', build)
+
+    with pytest.raises(WebSocketDisconnect) as exc:
+        with client.websocket_connect('/interviews/ws/s1?ticket=forged') as ws:
+            ws.receive_json()
+
+    assert exc.value.code == 1008
+    build.assert_not_awaited()
+
+
+def test_ws_rejects_reused_ticket(monkeypatch):
+    """이미 소비된 티켓으로 재연결하면 거절한다(1회용 — 재사용 불가)."""
+    _patch_llm(monkeypatch, main_questions=['자기소개를 부탁드립니다', '강점은?'])
+
+    ticket, _ = ws_ticket.issue_ticket('42', ttl_seconds=60)
+    url = f'/interviews/ws/s1?ticket={ticket}'
+    with client.websocket_connect(url) as ws:
+        ws.receive_json()  # 첫 연결은 정상
+
+    with pytest.raises(WebSocketDisconnect) as exc:
+        with client.websocket_connect(url) as ws:  # 같은 티켓 재사용
+            ws.receive_json()
+
+    assert exc.value.code == 1008
+
+
 def test_ws_audio_accumulates_then_transcribes_and_streams_eval(monkeypatch):
     _patch_llm(monkeypatch, eval_deltas=['답변 ', '구조가 ', '명확합니다'])
 
-    with client.websocket_connect('/interviews/ws/s1') as ws:
+    with client.websocket_connect(_ws_url()) as ws:
         ws.receive_json()  # 첫 질문
         ws.send_json({'type': 'control', 'action': 'answer_start'})
         ws.send_bytes(b'chunk-1')
@@ -109,7 +274,7 @@ def test_ws_audio_accumulates_then_transcribes_and_streams_eval(monkeypatch):
 def test_ws_answer_end_without_audio_skips_transcribe_and_eval(monkeypatch):
     _patch_llm(monkeypatch)
 
-    with client.websocket_connect('/interviews/ws/s1') as ws:
+    with client.websocket_connect(_ws_url()) as ws:
         ws.receive_json()  # 첫 질문
         ws.send_json({'type': 'control', 'action': 'answer_end'})  # 빈 답변
         # 빈 답변은 자막·평가 모두 생략 → 다음 메인으로 넘어가는지로 확인
@@ -124,7 +289,7 @@ def test_ws_answer_end_without_audio_skips_transcribe_and_eval(monkeypatch):
 def test_ws_answer_start_resets_buffer(monkeypatch):
     _patch_llm(monkeypatch, eval_deltas=['ok'])
 
-    with client.websocket_connect('/interviews/ws/s1') as ws:
+    with client.websocket_connect(_ws_url()) as ws:
         ws.receive_json()  # 첫 질문
         ws.send_bytes(b'stale-chunk')  # 이전 누적
         ws.send_json({'type': 'control', 'action': 'answer_start'})  # 리셋
@@ -140,7 +305,7 @@ def test_ws_answer_start_resets_buffer(monkeypatch):
 def test_ws_next_after_main_answer_sends_follow_up(monkeypatch):
     _patch_llm(monkeypatch, follow_up='그 협업에서 본인의 역할은 무엇이었나요?')
 
-    with client.websocket_connect('/interviews/ws/s1') as ws:
+    with client.websocket_connect(_ws_url()) as ws:
         assert ws.receive_json()['questionId'] == 'm0'
         ws.send_bytes(b'audio')
         ws.send_json({'type': 'control', 'action': 'answer_end'})
@@ -158,7 +323,7 @@ def test_ws_next_after_main_answer_sends_follow_up(monkeypatch):
 def test_ws_next_after_followup_answer_advances_to_next_main(monkeypatch):
     _patch_llm(monkeypatch)
 
-    with client.websocket_connect('/interviews/ws/s1') as ws:
+    with client.websocket_connect(_ws_url()) as ws:
         assert ws.receive_json()['questionId'] == 'm0'
         # 메인 답변 → 꼬리질문
         ws.send_bytes(b'a1')
@@ -180,7 +345,7 @@ def test_ws_summary_after_main_questions_exhausted(monkeypatch):
     monkeypatch.setattr(settings, 'interview_main_question_count', 1)
     _patch_llm(monkeypatch, main_questions=['자기소개 부탁드립니다'])
 
-    with client.websocket_connect('/interviews/ws/s1') as ws:
+    with client.websocket_connect(_ws_url()) as ws:
         assert ws.receive_json()['questionId'] == 'm0'
         ws.send_bytes(b'a1')
         ws.send_json({'type': 'control', 'action': 'answer_end'})
@@ -199,11 +364,53 @@ def test_ws_summary_after_main_questions_exhausted(monkeypatch):
     assert summary['improvements'] == ['결론 강화']
 
 
+def test_ws_ignores_control_after_summary(monkeypatch):
+    """요약(종료) 후의 next·answer_end 는 무시돼 요약·평가가 재실행되지 않는다.
+
+    한 티켓으로 control 을 계속 보내 요약·리포트·평가(LLM)와 결과 저장을 무한 재호출하는
+    비용 남용을 막는 가드 검증(빌린 OpenAI 키 보호).
+    """
+    monkeypatch.setattr(settings, 'interview_main_question_count', 1)
+    _patch_llm(monkeypatch, main_questions=['자기소개 부탁드립니다'])
+
+    summary_calls = {'count': 0}
+    real_build_summary = service.build_summary
+
+    async def _counting_build_summary(history, metrics=None):
+        summary_calls['count'] += 1
+        return await real_build_summary(history, metrics)
+
+    monkeypatch.setattr(service, 'build_summary', _counting_build_summary)
+
+    with client.websocket_connect(_ws_url()) as ws:
+        assert ws.receive_json()['questionId'] == 'm0'
+        ws.send_bytes(b'a1')
+        ws.send_json({'type': 'control', 'action': 'answer_end'})
+        _drain(ws, 3)
+        ws.send_json({'type': 'control', 'action': 'next'})  # 꼬리질문
+        assert ws.receive_json()['questionId'] == 'f0'
+        ws.send_bytes(b'a2')
+        ws.send_json({'type': 'control', 'action': 'answer_end'})
+        _drain(ws, 3)
+        ws.send_json({'type': 'control', 'action': 'next'})  # 메인 소진 → 요약
+        assert ws.receive_json()['type'] == 'summary'
+
+        # 요약 후 추가 전이 — 모두 무시되어야 한다(추가 다운스트림·요약 재실행 없음).
+        ws.send_json({'type': 'control', 'action': 'next'})
+        ws.send_json({'type': 'control', 'action': 'answer_start'})
+        ws.send_bytes(b'a3')
+        ws.send_json({'type': 'control', 'action': 'answer_end'})
+        # 루프가 살아 있고 무시됐음을 확인 — landmark 는 원래 무응답이라 데드락 없이 종료.
+        ws.send_json({'type': 'landmark_frame', 'gaze_x': 0.1})
+
+    assert summary_calls['count'] == 1  # 요약은 단 한 번만 생성됨
+
+
 def test_ws_landmark_frame_has_no_downstream_response(monkeypatch):
     """비언어 프레임은 누적만 — 즉시 다운스트림 응답이 없어 루프를 깨지 않는다."""
     _patch_llm(monkeypatch, eval_deltas=['ok'])
 
-    with client.websocket_connect('/interviews/ws/s1') as ws:
+    with client.websocket_connect(_ws_url()) as ws:
         ws.receive_json()  # 첫 질문
         ws.send_json({'type': 'landmark_frame', 'gaze_x': 0.1})  # 다운스트림 없음
         ws.send_bytes(b'audio')
@@ -224,12 +431,12 @@ def test_ws_accumulated_landmarks_reflected_in_summary(monkeypatch):
         summary={'overall_score': 90, 'language_feedback': '논리적', 'improvements': []},
     )
 
-    with client.websocket_connect('/interviews/ws/s1') as ws:
+    with client.websocket_connect(_ws_url()) as ws:
         assert ws.receive_json()['questionId'] == 'm0'
         ws.send_json({'type': 'control', 'action': 'answer_start'})
         for _ in range(5):
             ws.send_json({'type': 'landmark_frame', 'gaze_x': 0.95})  # 시선 이탈
-        ws.send_json({'type': 'event_snapshot', 'event': 'gaze_away', 'image': 'data:,'})
+        ws.send_json({'type': 'event_snapshot', 'event': 'gaze_away'})
         ws.send_bytes(b'audio')
         ws.send_json({'type': 'control', 'action': 'answer_end'})
         _drain(ws, 2)  # transcript + eval
@@ -258,7 +465,7 @@ def test_ws_summary_sent_even_if_nonverbal_aggregate_raises(monkeypatch):
     )
     monkeypatch.setattr(nonverbal, 'aggregate', Mock(side_effect=RuntimeError('boom')))
 
-    with client.websocket_connect('/interviews/ws/s1') as ws:
+    with client.websocket_connect(_ws_url()) as ws:
         assert ws.receive_json()['questionId'] == 'm0'
         ws.send_bytes(b'a1')
         ws.send_json({'type': 'control', 'action': 'answer_end'})
@@ -275,17 +482,166 @@ def test_ws_summary_sent_even_if_nonverbal_aggregate_raises(monkeypatch):
     assert summary['overallScore'] == 80.0  # 집계 실패 → 감점 0 으로 우회
 
 
+# ── 텍스트 모드 답변 (text_answer) ─────────────────────────────────────
+
+
+def test_ws_text_answer_used_as_answer_and_streams_eval(monkeypatch):
+    """타이핑 답변(text_answer)이 오면 전사 없이 그 텍스트로 자막(final)+평가를 낸다."""
+    _patch_llm(monkeypatch, eval_deltas=['좋은 ', '답변'])
+
+    with client.websocket_connect(_ws_url()) as ws:
+        ws.receive_json()  # 첫 질문
+        ws.send_json({'type': 'control', 'action': 'answer_start'})
+        ws.send_json({'type': 'text_answer', 'text': '제 강점은 끈기입니다'})
+        ws.send_json({'type': 'control', 'action': 'answer_end'})
+        transcript = ws.receive_json()
+        evals = [ws.receive_json() for _ in range(2)]
+
+    assert transcript['type'] == 'transcript_delta'
+    assert transcript['delta'] == '제 강점은 끈기입니다'  # 타이핑 본문이 자막으로
+    assert transcript['isFinal'] is True
+    assert ''.join(e['delta'] for e in evals) == '좋은 답변'  # 그 텍스트로 평가
+    stt.transcribe_audio.assert_not_awaited()  # 타이핑 답변 → 전사 미호출(과금 0)
+
+
+def test_ws_text_answer_takes_precedence_over_audio(monkeypatch):
+    """타이핑 답변이 있으면 같은 답변에 보낸 오디오는 무시하고 텍스트를 쓴다."""
+    _patch_llm(monkeypatch, eval_deltas=['ok'])
+
+    with client.websocket_connect(_ws_url()) as ws:
+        ws.receive_json()  # 첫 질문
+        ws.send_json({'type': 'control', 'action': 'answer_start'})
+        ws.send_bytes(b'audio-chunk')  # 오디오도 보냄
+        ws.send_json({'type': 'text_answer', 'text': '타이핑이 우선'})
+        ws.send_json({'type': 'control', 'action': 'answer_end'})
+        transcript = ws.receive_json()
+        ws.receive_json()  # eval
+
+    assert transcript['delta'] == '타이핑이 우선'
+    stt.transcribe_audio.assert_not_awaited()  # 오디오 무시 → 전사 안 함
+
+
+def test_ws_text_answer_truncated_to_max_chars(monkeypatch):
+    """거대한 타이핑 답변은 상한까지만 잘라 저장한다(토큰 비용 남용 방지, 면접 안 끊김)."""
+    _patch_llm(monkeypatch, eval_deltas=['ok'])
+    huge = 'x' * (router._MAX_ANSWER_CHARS + 500)
+
+    with client.websocket_connect(_ws_url()) as ws:
+        ws.receive_json()  # 첫 질문
+        ws.send_json({'type': 'control', 'action': 'answer_start'})
+        ws.send_json({'type': 'text_answer', 'text': huge})
+        ws.send_json({'type': 'control', 'action': 'answer_end'})
+        transcript = ws.receive_json()
+        ws.receive_json()  # eval
+
+    assert len(transcript['delta']) == router._MAX_ANSWER_CHARS  # 상한까지만
+    assert transcript['delta'] == 'x' * router._MAX_ANSWER_CHARS
+
+
+def test_ws_answer_start_clears_typed_answer(monkeypatch):
+    """answer_start 가 직전 타이핑 답변을 비워, 새 답변이 빈 채면 평가를 생략한다."""
+    _patch_llm(monkeypatch)
+
+    with client.websocket_connect(_ws_url()) as ws:
+        ws.receive_json()  # 첫 질문
+        ws.send_json({'type': 'text_answer', 'text': '버려질 답변'})
+        ws.send_json({'type': 'control', 'action': 'answer_start'})  # 리셋
+        ws.send_json({'type': 'control', 'action': 'answer_end'})  # 빈 답변
+        ws.send_json({'type': 'control', 'action': 'next'})
+        nxt = ws.receive_json()
+
+    # 타이핑 답변이 리셋돼 빈 답변 → 꼬리질문 생략 → 곧장 다음 메인
+    assert nxt['questionId'] == 'm1'
+    stt.transcribe_audio.assert_not_awaited()
+
+
+# ── 실시간 부분 자막 (interview_partial_transcript) ────────────────────
+
+
+def _enable_partial(monkeypatch, *, every: int, transcripts: list[str]) -> None:
+    """부분 자막 모드를 켜고, 누적 버퍼 재전사가 점점 길어지는 텍스트를 반환하게 한다."""
+    monkeypatch.setattr(settings, 'interview_partial_transcript', True)
+    monkeypatch.setattr(settings, 'interview_partial_transcript_every', every)
+    monkeypatch.setattr(stt, 'transcribe_audio', AsyncMock(side_effect=transcripts))
+
+
+def test_ws_partial_transcript_streams_while_answering(monkeypatch):
+    """부분 자막 모드: every 청크마다 부분 자막(isFinal=False)을 흘리고,
+    answer_end 에 최종 전사로 남은 꼬리만 final 로 보낸다."""
+    _patch_llm(monkeypatch, eval_deltas=['ok'])
+    _enable_partial(
+        monkeypatch, every=2, transcripts=['안녕하세요', '안녕하세요 반갑습니다']
+    )
+
+    with client.websocket_connect(_ws_url()) as ws:
+        ws.receive_json()  # 첫 질문
+        ws.send_json({'type': 'control', 'action': 'answer_start'})
+        ws.send_bytes(b'c1')
+        ws.send_bytes(b'c2')  # every=2 → 부분 전사 1회
+        partial = ws.receive_json()
+        ws.send_json({'type': 'control', 'action': 'answer_end'})
+        final = ws.receive_json()
+        ws.receive_json()  # eval
+
+    assert partial['type'] == 'transcript_delta'
+    assert partial['isFinal'] is False
+    assert partial['delta'] == '안녕하세요'
+    assert final['isFinal'] is True
+    assert final['delta'] == ' 반갑습니다'  # 이미 보낸 부분 뒤 꼬리만
+    assert stt.transcribe_audio.await_count == 2  # 부분 1 + 최종 1
+
+
+def test_ws_partial_transcript_final_close_marker_when_no_new_text(monkeypatch):
+    """최종 전사가 부분 자막과 같으면 새 꼬리가 없어 빈 종료 마커(delta='')를 보낸다."""
+    _patch_llm(monkeypatch, eval_deltas=['ok'])
+    _enable_partial(monkeypatch, every=2, transcripts=['안녕하세요', '안녕하세요'])
+
+    with client.websocket_connect(_ws_url()) as ws:
+        ws.receive_json()  # 첫 질문
+        ws.send_json({'type': 'control', 'action': 'answer_start'})
+        ws.send_bytes(b'c1')
+        ws.send_bytes(b'c2')
+        partial = ws.receive_json()
+        ws.send_json({'type': 'control', 'action': 'answer_end'})
+        final = ws.receive_json()
+        ws.receive_json()  # eval
+
+    assert partial['delta'] == '안녕하세요'
+    assert final['delta'] == ''  # 새 내용 없음 → 종료 마커
+    assert final['isFinal'] is True
+
+
+def test_ws_partial_below_threshold_skips_partial_but_finalizes(monkeypatch):
+    """청크가 간격(every)에 못 미치면 부분 자막 없이, answer_end 에 전체를 final 로 낸다."""
+    _patch_llm(monkeypatch, eval_deltas=['ok'])
+    _enable_partial(monkeypatch, every=5, transcripts=['전체 답변입니다'])
+
+    with client.websocket_connect(_ws_url()) as ws:
+        ws.receive_json()  # 첫 질문
+        ws.send_json({'type': 'control', 'action': 'answer_start'})
+        ws.send_bytes(b'c1')
+        ws.send_bytes(b'c2')  # every=5 미달 → 부분 자막 없음
+        ws.send_json({'type': 'control', 'action': 'answer_end'})
+        final = ws.receive_json()
+        ws.receive_json()  # eval
+
+    assert final['type'] == 'transcript_delta'
+    assert final['isFinal'] is True
+    assert final['delta'] == '전체 답변입니다'  # 부분이 없었으니 전체가 꼬리
+    assert stt.transcribe_audio.await_count == 1  # 최종 전사 1회만
+
+
 # ── 더미 자막 스트리밍 모드 (interview_dummy_transcript=True) ──────────
 
 
 def test_ws_dummy_mode_streams_partial_transcript_per_chunk(monkeypatch):
     """더미 모드: 오디오 청크마다 부분 자막(isFinal=False)이 즉시 흐르고,
     answer_end 에 종료 마커(isFinal=True)가 온 뒤 평가가 스트리밍된다.
-    실 STT(whisper-1)는 호출되지 않는다(과금 0)."""
+    실 STT(gpt-4o-mini-transcribe)는 호출되지 않는다(과금 0)."""
     _patch_llm(monkeypatch, eval_deltas=['좋은 ', '답변'])
     monkeypatch.setattr(settings, 'interview_dummy_transcript', True)
 
-    with client.websocket_connect('/interviews/ws/s1') as ws:
+    with client.websocket_connect(_ws_url()) as ws:
         ws.receive_json()  # 첫 질문
         ws.send_json({'type': 'control', 'action': 'answer_start'})
         ws.send_bytes(b'c1')
@@ -310,7 +666,7 @@ def test_ws_dummy_mode_empty_answer_skips_final_and_eval(monkeypatch):
     _patch_llm(monkeypatch)
     monkeypatch.setattr(settings, 'interview_dummy_transcript', True)
 
-    with client.websocket_connect('/interviews/ws/s1') as ws:
+    with client.websocket_connect(_ws_url()) as ws:
         ws.receive_json()  # 첫 질문
         ws.send_json({'type': 'control', 'action': 'answer_start'})  # 청크 없음
         ws.send_json({'type': 'control', 'action': 'answer_end'})  # 빈 답변
@@ -327,7 +683,7 @@ def test_ws_dummy_mode_resets_token_sequence_each_answer(monkeypatch):
     _patch_llm(monkeypatch, main_questions=['자기소개', '강점은?'], eval_deltas=['ok'])
     monkeypatch.setattr(settings, 'interview_dummy_transcript', True)
 
-    with client.websocket_connect('/interviews/ws/s1') as ws:
+    with client.websocket_connect(_ws_url()) as ws:
         ws.receive_json()  # m0
         ws.send_json({'type': 'control', 'action': 'answer_start'})
         ws.send_bytes(b'a1')
