@@ -1,6 +1,6 @@
 """비언어 신호 집계 — landmark_frame·event_snapshot → 면접 태도 지표 (Phase 4).
 
-프론트(MediaPipe)가 ~1s 주기로 보내는 얼굴 랜드마크와 이벤트 스냅샷을 받아
+프론트(MediaPipe)가 ~1s 주기로 보내는 얼굴 랜드마크와 이벤트(종류·메타)를 받아
 시선이탈률·고개흔들림·표정분포·이벤트카운트로 집계하고, 사람이 읽는 피드백
 문장(describe)과 최종 점수 가감치(score_penalty)로 변환한다.
 
