@@ -200,14 +200,17 @@ def test_get_trending_logo_url_prefers_curated(db, mongo):
 
 
 def test_get_trending_logo_url_auto_from_website(db, mongo):
-    # 큐레이션 없으면 website_url 도메인으로 CDN 로고 URL 을 만든다
+    # 큐레이션 없으면 website_url 도메인으로 Google favicon URL 을 만든다
     today = date.today()
     repository.increment_view(db, CID_A, today)
     db.commit()
     _seed_company(mongo, CID_A, "회사에이", website_url="https://www.cj.net")
 
     cards = service.get_trending(db, mongo, limit=5, window_days=7)
-    assert cards[0]["logo_url"] == "https://logo.clearbit.com/cj.net"
+    assert (
+        cards[0]["logo_url"]
+        == "https://www.google.com/s2/favicons?domain=cj.net&sz=128"
+    )
 
 
 def test_get_trending_logo_url_none_when_no_source(db, mongo):
