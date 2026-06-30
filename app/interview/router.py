@@ -19,12 +19,13 @@ import logging
 from dataclasses import dataclass, field, replace
 
 import jwt
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from app.auth.security import decode_access_token
 from app.core.config import settings
-from app.interview import nonverbal, service
+from app.interview import nonverbal, service, ws_ticket
 from app.interview.schemas import (
     ControlAction,
     ControlMessage,
@@ -32,6 +33,7 @@ from app.interview.schemas import (
     LandmarkFrameMessage,
     TextAnswerMessage,
     UpstreamMessage,
+    WsTicketOut,
 )
 
 logger = logging.getLogger(__name__)
@@ -40,10 +42,24 @@ router = APIRouter(prefix='/interviews', tags=['interview'])
 
 _upstream_adapter: TypeAdapter[UpstreamMessage] = TypeAdapter(UpstreamMessage)
 
+# Bearer 토큰을 직접 처리한다 — 헤더 자체가 없을 때도 401 로 통일하기 위해
+# auto_error=False(없으면 403 대신 None 반환)로 받고 아래에서 명시적으로 막는다.
+_bearer = HTTPBearer(auto_error=False)
+
+_ticket_auth_error = HTTPException(
+    status_code=status.HTTP_401_UNAUTHORIZED,
+    detail='유효하지 않은 인증 정보입니다',
+    headers={'WWW-Authenticate': 'Bearer'},
+)
+
 # 비언어 누적 상한 — 집계는 통계라 최근 N개면 충분하다. 긴 세션에서 무한 누적·
 # tuple 복사 비용(특히 event_snapshot 의 base64 image)을 막는 방어선이다.
 _MAX_LANDMARKS = 1200  # ~20분 @ 1s
 _MAX_EVENTS = 500
+# 타이핑 답변(text_answer) 한 건의 최대 길이. 면접 답변은 길어야 수천 자라 넉넉하다.
+# 답변은 평가 1회 + 요약(매 턴 누적)으로 LLM 에 들어가므로, 거대한 붙여넣기로
+# 빌린 OpenAI 키 토큰을 증폭시키지 못하게 자른다(버리지 않고 앞부분만 — 면접 안 끊김).
+_MAX_ANSWER_CHARS = 5000
 
 
 @dataclass(frozen=True)
@@ -83,19 +99,32 @@ async def _send(websocket: WebSocket, event: BaseModel) -> None:
     await websocket.send_json(event.model_dump(by_alias=True))
 
 
-def _decode_user_id(token: str | None) -> str | None:
-    """WS 쿼리 토큰을 검증해 user_id 를 꺼낸다(없거나 유효하지 않으면 None).
+@router.post(
+    '/ws-ticket',
+    response_model=WsTicketOut,
+    response_model_by_alias=True,
+)
+async def issue_ws_ticket(
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
+) -> WsTicketOut:
+    """면접 WS 입장용 단기 1회용 티켓을 발급한다(Bearer JWT 필요).
 
-    브라우저 WS 는 Authorization 헤더를 못 붙이므로 토큰을 쿼리로 받는다. 검증
-    실패는 익명 진행으로 우회한다 — 개인화만 생략될 뿐 면접은 끊기지 않는다.
+    브라우저 WS 는 헤더를 못 붙이고 JWT 는 httpOnly 쿠키라 JS 로 못 읽으므로,
+    입장 직전 이 일반 HTTP 로 티켓을 받아 WS 쿼리(?ticket=...)로만 실어 보낸다.
+    JWT 가 없거나 무효면 401(로그에 토큰 평문은 남기지 않는다).
+
+    async 로 둔다 — 내부가 모두 동기·즉시 반환이라 이벤트 루프 단일 스레드에서
+    발급·소비(WS 의 consume_ticket)가 직렬화돼 모듈 전역 _store 경합을 피한다.
     """
-    if not token:
-        return None
+    if credentials is None:
+        raise _ticket_auth_error
     try:
-        return decode_access_token(token)
+        user_id = decode_access_token(credentials.credentials)
     except jwt.PyJWTError as error:
-        logger.warning('면접 WS 토큰 검증 실패, 익명으로 진행: %s', error)
-        return None
+        logger.warning('WS 티켓 발급 거부 — JWT 검증 실패: %s', error)
+        raise _ticket_auth_error from error
+    ticket, expires_in = ws_ticket.issue_ticket(user_id)
+    return WsTicketOut(ticket=ticket, expires_in=expires_in)
 
 
 def _get_mongo_db(websocket: WebSocket):
@@ -110,15 +139,19 @@ def _open_db_session(websocket: WebSocket):
     return factory() if factory is not None else None
 
 
-async def _build_questions(websocket: WebSocket) -> list[str]:
-    """접속 쿼리(companyId·token)와 DB 로 개인화 메인 질문을 생성한다.
+async def _build_questions(websocket: WebSocket, user_id: str) -> list[str]:
+    """접속 쿼리(companyId·jobTitle)와 user_id·DB 로 개인화 메인 질문을 생성한다.
+
+    user_id 는 핸들러가 입장 티켓을 소비해 확정한 값이다(여기로 주입된다). companyId·
+    jobTitle 은 선택 — companyId 가 없으면 회사 컨텍스트 주입만, jobTitle 이 없으면
+    직무 주입만 생략한다(query_params 는 URL 디코딩된 값을 준다).
 
     MariaDB 세션은 질문 생성 동안만 열고 곧장 닫는다 — 면접 루프는 DB 가 필요 없어
     긴 세션 내내 풀 커넥션을 점유하지 않게 한다. MongoDB 핸들은 앱 수명이 관리한다.
     """
     params = websocket.query_params
     company_id = params.get('companyId') or params.get('company_id')
-    user_id = _decode_user_id(params.get('token'))
+    job_title = params.get('jobTitle') or params.get('job_title')
     mongo = _get_mongo_db(websocket)
     db = _open_db_session(websocket)
     try:
@@ -126,6 +159,7 @@ async def _build_questions(websocket: WebSocket) -> list[str]:
             settings.interview_main_question_count,
             company_id=company_id,
             user_id=user_id,
+            job_title=job_title,
             db=db,
             mongo=mongo,
         )
@@ -138,12 +172,20 @@ async def _build_questions(websocket: WebSocket) -> list[str]:
 async def interview_ws(websocket: WebSocket, session_id: str) -> None:
     """실시간 면접 WS.
 
-    접속 시 회사 분석·지원자 이력서 컨텍스트로 메인 질문을 생성해 첫 질문을 보낸 뒤,
-    업스트림 프레임을 분기 처리한다(binary=답변 오디오 누적, text=control/landmark/event).
-    회사·지원자 식별자는 접속 쿼리(``?companyId=...&token=<JWT>``)로 받는다.
+    접속 직후 입장 티켓(?ticket=...)을 1회 소비해 user_id 를 확정한다. 티켓이 없거나
+    무효·만료·재사용이면 정책 위반(1008)으로 연결을 거절한다 — 면접은 로그인 사용자
+    전용이고, 빌린 OpenAI 키 비용 남용을 막는 실질 경계는 프론트 가드가 아니라 여기다.
+    인증을 통과하면 회사 분석·지원자 이력서 컨텍스트로 메인 질문을 생성해 첫 질문을
+    보낸 뒤, 업스트림 프레임을 분기 처리한다(binary=답변 오디오 누적, text=control/
+    landmark/event). 티켓은 POST /interviews/ws-ticket 으로 미리 발급받는다.
     """
+    user_id = ws_ticket.consume_ticket(websocket.query_params.get('ticket'))
+    if user_id is None:
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+
     await websocket.accept()
-    questions = await _build_questions(websocket)
+    questions = await _build_questions(websocket, user_id)
     first = questions[0]
     session = _WsSession(main_questions=tuple(questions), current_question=first)
     await _send(websocket, service.question_event('m0', first))
@@ -222,8 +264,9 @@ async def _handle_message(
         events = (session.events + (message,))[-_MAX_EVENTS:]
         return replace(session, events=events)
     # 텍스트 모드 답변 — 다운스트림 응답 없이 세션에 저장만 한다(answer_end 에서 사용).
+    # 토큰 비용 남용 방지로 상한까지만 저장한다(초과분은 잘라냄, 정상 답변은 안 걸림).
     if isinstance(message, TextAnswerMessage):
-        return replace(session, typed_answer=message.text)
+        return replace(session, typed_answer=message.text[:_MAX_ANSWER_CHARS])
     if not isinstance(message, ControlMessage):
         return session
 

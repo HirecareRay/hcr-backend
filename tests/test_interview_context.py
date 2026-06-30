@@ -12,18 +12,18 @@ from app.interview import context
 # ── get_company_context ────────────────────────────────────────────
 
 
-def test_company_context_returns_mock_without_db():
-    """db·mongo·company_id 가 없으면 mock 회사 컨텍스트로 우회한다."""
+def test_company_context_empty_without_db():
+    """db·mongo·company_id 가 없으면 빈 문자열(가짜 회사 끼우지 않는다)."""
     result = asyncio.run(context.get_company_context())
-    assert result == context.MOCK_COMPANY_CONTEXT
+    assert result == ''
 
 
-def test_company_context_returns_mock_when_company_id_missing():
-    """db·mongo 가 있어도 company_id 가 비면 mock 으로 우회한다."""
+def test_company_context_empty_when_company_id_missing():
+    """db·mongo 가 있어도 company_id 가 비면 빈 문자열로 우회한다."""
     result = asyncio.run(
         context.get_company_context(db=object(), mongo=object(), company_id='')
     )
-    assert result == context.MOCK_COMPANY_CONTEXT
+    assert result == ''
 
 
 def test_company_context_delegates_to_company_service(monkeypatch):
@@ -39,8 +39,8 @@ def test_company_context_delegates_to_company_service(monkeypatch):
     assert result == '회사명: CJ ENM'
 
 
-def test_company_context_falls_back_to_mock_on_error(monkeypatch):
-    """회사 조회·조립이 실패하면 mock 으로 우회한다(면접 안 끊김)."""
+def test_company_context_falls_back_to_empty_on_error(monkeypatch):
+    """회사 조회·조립이 실패하면 빈 문자열로 우회한다(면접 안 끊김)."""
     from app.company import service as company_service
 
     def _boom(db, mongo, cid):
@@ -50,7 +50,7 @@ def test_company_context_falls_back_to_mock_on_error(monkeypatch):
     result = asyncio.run(
         context.get_company_context(db=object(), mongo=object(), company_id='abc123')
     )
-    assert result == context.MOCK_COMPANY_CONTEXT
+    assert result == ''
 
 
 # ── get_user_context ───────────────────────────────────────────────
@@ -89,6 +89,17 @@ def test_user_context_formats_document(monkeypatch):
         'cover_letter': {
             'items': [{'title': '지원동기', 'content': '성장하는 회사에서 일하고 싶습니다'}]
         },
+        'work_experience': {
+            'work_experience': [
+                {
+                    'company_name': '네이버',
+                    'position': '백엔드 개발자',
+                    'start_date': '2021-01',
+                    'end_date': '2023-12',
+                    'responsibilities': ['검색 API 개발', '대용량 트래픽 처리'],
+                }
+            ]
+        },
     }
     monkeypatch.setattr(repository, 'find_user_documents', lambda db, uid: document)
 
@@ -100,6 +111,9 @@ def test_user_context_formats_document(monkeypatch):
     assert '정보처리기사' in result
     assert 'HCR / 리드: 실시간 면접 백엔드' in result
     assert '지원동기' in result
+    assert '[경력기술서]' in result
+    assert '네이버' in result and '백엔드 개발자' in result
+    assert '검색 API 개발' in result
 
 
 def test_user_context_falls_back_to_empty_on_error(monkeypatch):
@@ -143,8 +157,39 @@ def test_format_cover_letter_extracts_titled_snippets():
     assert '장단점: 집중력' in out  # title 없으면 category 사용
 
 
+def test_format_work_experience_extracts_company_role_and_tasks():
+    """경력기술서는 회사·직무·기간 + 주요 업무 발췌를 상위 limit 개만 뽑는다."""
+    assert context._format_work_experience(None) == ''
+    assert context._format_work_experience([]) == ''
+    items = [
+        {
+            'company_name': '카카오',
+            'position': '서버 개발자',
+            'start_date': '2020-03',
+            'end_date': '2022-02',
+            'responsibilities': ['결제 시스템 운영', '장애 대응'],
+        }
+    ]
+    out = context._format_work_experience(items)
+    assert out.startswith('[경력기술서]')
+    assert '카카오 / 서버 개발자' in out
+    assert '2020-03 ~ 2022-02' in out
+    assert '결제 시스템 운영' in out
+
+
+def test_format_work_experience_limits_and_truncates():
+    """경력은 상위 limit 개만, 업무 요약은 120자로 절단한다."""
+    items = [
+        {'company_name': f'C{i}', 'responsibilities': ['x' * 200]} for i in range(10)
+    ]
+    out = context._format_work_experience(items, limit=2)
+    assert out.count('\n- ') == 2
+    assert 'C2' not in out
+    assert 'x' * 120 in out and 'x' * 121 not in out
+
+
 def test_format_user_context_joins_present_sections(monkeypatch):
     """존재하는 섹션만 줄바꿈으로 잇는다(없는 섹션은 생략)."""
     document = {'resume': {'tools_skills': [{'name': 'Rust'}]}}
     out = context._format_user_context(document)
-    assert out == '[이력서]\n보유 기술: Rust'  # 포폴·자소서 없음 → 이력서만
+    assert out == '[이력서]\n보유 기술: Rust'  # 포폴·자소서·경력기술서 없음 → 이력서만

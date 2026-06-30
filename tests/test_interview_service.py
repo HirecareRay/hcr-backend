@@ -17,12 +17,39 @@ from app.interview.schemas import EventSnapshotMessage, LandmarkFrameMessage
 
 
 def test_build_main_questions_uses_llm_result(monkeypatch):
-    """LLM 이 질문을 주면 그대로 사용한다."""
+    """컨텍스트가 하나라도 있으면(여기선 직무) LLM 질문을 그대로 사용한다."""
     monkeypatch.setattr(
         llm, 'generate_main_questions', AsyncMock(return_value=['자기소개?', '동기?'])
     )
-    questions = asyncio.run(service.build_main_questions(2))
+    questions = asyncio.run(service.build_main_questions(2, job_title='백엔드 개발자'))
     assert questions == ['자기소개?', '동기?']
+
+
+def test_build_main_questions_empty_context_skips_llm(monkeypatch):
+    """회사·지원자·직무가 모두 없으면 LLM 호출 없이 기본 질문으로 폴백한다."""
+    monkeypatch.setattr(
+        llm,
+        'generate_main_questions',
+        AsyncMock(side_effect=AssertionError('빈 컨텍스트면 LLM 호출 금지')),
+    )
+    questions = asyncio.run(service.build_main_questions(4))
+    assert questions == list(context.FALLBACK_MAIN_QUESTIONS)
+
+
+def test_build_main_questions_job_title_only_invokes_llm(monkeypatch):
+    """직무만 주어져도 그 직무를 LLM 에 넘겨 개인화 질문을 만든다."""
+    captured: dict = {}
+
+    async def _fake_generate(company_context, user_context, job_title, count):
+        captured['job_title'] = job_title
+        return ['데이터 파이프라인 경험은?', '자기소개?']
+
+    monkeypatch.setattr(llm, 'generate_main_questions', _fake_generate)
+    questions = asyncio.run(
+        service.build_main_questions(2, job_title='데이터 엔지니어')
+    )
+    assert captured['job_title'] == '데이터 엔지니어'
+    assert questions == ['데이터 파이프라인 경험은?', '자기소개?']
 
 
 def test_build_main_questions_passes_company_and_user_context_to_llm(monkeypatch):
@@ -37,9 +64,10 @@ def test_build_main_questions_passes_company_and_user_context_to_llm(monkeypatch
         captured['user_id'] = user_id
         return '[이력서]\n보유 기술: Python'
 
-    async def _fake_generate(company_context, user_context, count):
+    async def _fake_generate(company_context, user_context, job_title, count):
         captured['company_context'] = company_context
         captured['user_context'] = user_context
+        captured['job_title'] = job_title
         return ['자기소개?', '파이썬 경험은?']
 
     monkeypatch.setattr(context, 'get_company_context', _fake_company)
@@ -48,7 +76,12 @@ def test_build_main_questions_passes_company_and_user_context_to_llm(monkeypatch
 
     questions = asyncio.run(
         service.build_main_questions(
-            2, company_id='c1', user_id='u1', db=object(), mongo=object()
+            2,
+            company_id='c1',
+            user_id='u1',
+            job_title='백엔드 개발자',
+            db=object(),
+            mongo=object(),
         )
     )
 
@@ -57,6 +90,7 @@ def test_build_main_questions_passes_company_and_user_context_to_llm(monkeypatch
     assert captured['user_id'] == 'u1'
     assert captured['company_context'] == '회사명: CJ ENM'
     assert captured['user_context'] == '[이력서]\n보유 기술: Python'
+    assert captured['job_title'] == '백엔드 개발자'
 
 
 def test_build_main_questions_falls_back_on_error(monkeypatch):
@@ -66,14 +100,14 @@ def test_build_main_questions_falls_back_on_error(monkeypatch):
         'generate_main_questions',
         AsyncMock(side_effect=RuntimeError('LLM down')),
     )
-    questions = asyncio.run(service.build_main_questions(4))
+    questions = asyncio.run(service.build_main_questions(4, job_title='백엔드 개발자'))
     assert questions == list(context.FALLBACK_MAIN_QUESTIONS)
 
 
 def test_build_main_questions_falls_back_on_empty(monkeypatch):
     """LLM 이 빈 목록을 주면 기본 질문으로 우회한다."""
     monkeypatch.setattr(llm, 'generate_main_questions', AsyncMock(return_value=[]))
-    questions = asyncio.run(service.build_main_questions(4))
+    questions = asyncio.run(service.build_main_questions(4, job_title='백엔드 개발자'))
     assert questions == list(context.FALLBACK_MAIN_QUESTIONS)
 
 
@@ -82,7 +116,7 @@ def test_build_main_questions_pads_short_result_with_fallback(monkeypatch):
     monkeypatch.setattr(
         llm, 'generate_main_questions', AsyncMock(return_value=['회사 맞춤 질문?'])
     )
-    questions = asyncio.run(service.build_main_questions(3))
+    questions = asyncio.run(service.build_main_questions(3, job_title='백엔드 개발자'))
 
     assert len(questions) == 3
     assert questions[0] == '회사 맞춤 질문?'  # LLM 질문이 앞에 온다
