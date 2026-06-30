@@ -14,7 +14,6 @@ from app.company.models import (
     CompanyAnalysis,
     CompanyCrawler,
     JobplanetReview,
-    JobPosting,
     News,
     SimilarCompany,
 )
@@ -108,11 +107,22 @@ def find_news(db: Session, company_id: str, limit: int = 10) -> list[News]:
     )
 
 
-def find_jobs(db: Session, company_id: str, limit: int = 20) -> list[JobPosting]:
+def find_jobs(mongo: Database, company_id: str, limit: int = 20) -> list[dict]:
+    """채용공고(상세 풀버전) — Mongo job_postings. company_id 는 ObjectId 로 저장됨."""
     return list(
-        db.execute(
-            select(JobPosting).where(JobPosting.company_id == company_id).limit(limit)
-        ).scalars().all()
+        mongo["job_postings"]
+        .find({"company_id": ObjectId(company_id)})
+        .limit(limit)
+    )
+
+
+def find_jobs_by_company_ids(mongo: Database, company_ids: list[str], limit: int = 20) -> list[dict]:
+    """여러 회사(검색 결과)의 공고를 한 번에 조회. 검색 페이지 '연관 채용공고'용."""
+    if not company_ids:
+        return []
+    oids = [ObjectId(i) for i in company_ids]
+    return list(
+        mongo["job_postings"].find({"company_id": {"$in": oids}}).limit(limit)
     )
 
 

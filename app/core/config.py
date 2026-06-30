@@ -51,8 +51,31 @@ class Settings(BaseSettings):
 
     # 면접 자막 — True 면 오디오 청크마다 더미 부분 자막을 흘려 실시간 자막 UX 를
     # OpenAI 호출·키 없이 시연한다(Phase 1 워킹 스켈레톤). False(기본)면 answer_end
-    # 에 누적 오디오를 whisper-1 로 한 번에 전사하는 실 STT 경로를 쓴다.
+    # 에 누적 오디오를 gpt-4o-mini-transcribe 로 한 번에 전사하는 실 STT 경로를 쓴다.
     interview_dummy_transcript: bool = False
+
+    # 면접 실시간 부분 자막 — True 면 답변 중 누적 오디오를 일정 간격으로 재전사해
+    # 부분 자막(transcript_delta isFinal=False)을 흘려 '말하면서 자막이 차오르는'
+    # UX 를 만든다. False(기본)면 answer_end 에 한 번만 전사한다(배치).
+    # ⚠️ 비용: 켜면 누적 버퍼를 반복 전사하므로 OpenAI 호출이 늘어 과금이 커진다
+    # (강사님 키 주의). 더미 모드(interview_dummy_transcript)가 켜져 있으면 그쪽이
+    # 우선이라 이 설정은 무시된다.
+    interview_partial_transcript: bool = False
+    # 부분 자막 재전사 간격(오디오 청크 N개마다 1회). 작을수록 자막이 자주 갱신되지만
+    # 비용↑. 프론트 MediaRecorder timeslice 에 맞춰 튜닝한다. 1~50 으로 제한.
+    interview_partial_transcript_every: int = Field(8, ge=1, le=50)
+
+    # 면접 WS 입장 티켓 TTL(초) — 브라우저 WS 는 헤더를 못 붙이므로 JWT 대신 단기·
+    # 1회용 티켓을 쿼리로 받는다. 짧을수록 URL 노출 위험이 줄지만 너무 짧으면 발급↔
+    # 연결 사이 지연에 걸린다. 10~300 으로 제한(기본 60).
+    interview_ws_ticket_ttl_seconds: int = Field(60, ge=10, le=300)
+
+    # 면접 WS 보안 — CSWSH(Cross-Site WebSocket Hijacking) 방어용 허용 Origin 목록.
+    # 브라우저는 WS 핸드셰이크에 Origin 헤더를 위조 불가로 자동으로 싣지만, WS 엔
+    # CORS 가 적용되지 않으므로 서버가 직접 출처를 본다(파싱·판정은 ws_origin.py).
+    # 콤마 구분 다중 도메인 예: "https://hcr.example.com,https://www.hcr.example.com"
+    # ⚠️ 운영에선 반드시 .env 로 도메인을 채운다 — 비우면 개발 모드(로컬 프론트만 허용)다.
+    interview_allowed_origins: str = ""
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
