@@ -81,6 +81,26 @@ def _sort_key(item: dict) -> tuple[bool, str]:
     return (deadline is None, deadline or "")
 
 
+def search_jobs(mongo: Database, q: str, limit: int = 20) -> list[dict]:
+    """공고명·회사명·직군명에 검색어가 포함된 진행중 채용공고 — /jobs/search(검색 페이지 탭)용.
+
+    직군 탭 고정 분류 없이 전체 진행중 공고를 대상으로 자유 키워드 매칭 후 마감임박순 정렬.
+    """
+    kw = (q or "").strip().lower()
+    if not kw:
+        return []
+    docs = repository.find_open_job_postings(mongo, date.today().isoformat())
+    items = [_to_job_item(d) for d in docs]
+    matched = [
+        it
+        for it in items
+        if kw in it["title"].lower()
+        or kw in it["company_name"].lower()
+        or kw in it["job_role_label"].lower()
+    ]
+    return sorted(matched, key=_sort_key)[:limit]
+
+
 def build_jobs_by_role(
     mongo: Database,
     roles: list[str],
