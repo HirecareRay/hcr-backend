@@ -334,3 +334,28 @@ def test_build_summary_rejects_non_finite_score(monkeypatch):
         )
         summary = asyncio.run(service.build_summary(()))
         assert summary.overall_score == 0.0
+
+
+# ── 무응답 판별·직렬화 ─────────────────────────────────────────────────
+
+
+def test_has_any_answer_detects_real_answers():
+    """공백만·빈 답변은 무응답으로, 실제 답변이 하나라도 있으면 True."""
+    assert not service.has_any_answer(())
+    assert not service.has_any_answer(
+        (service.Turn('q', '', '', 'common'), service.Turn('q', '  ', '', 'common'))
+    )
+    assert service.has_any_answer(
+        (service.Turn('q', '', '', 'common'), service.Turn('q', '답변함', 'e', 'common'))
+    )
+
+
+def test_format_history_marks_unanswered_turns():
+    """무응답 턴은 '(무응답)'으로 명시해 LLM 이 빈 답변을 오해하지 않게 한다."""
+    history = (
+        service.Turn('q1', '', '', 'common'),
+        service.Turn('q2', '실제 답변', 'e', 'common'),
+    )
+    text = service.format_history(history)
+    assert 'A1: (무응답)' in text
+    assert 'A2: 실제 답변' in text

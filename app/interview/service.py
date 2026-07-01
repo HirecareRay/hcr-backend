@@ -287,10 +287,32 @@ async def build_summary(
     return _summary_event(data, metrics or NonverbalMetrics())
 
 
+def is_answered(turn: Turn) -> bool:
+    """그 턴에 실질 답변이 있는지 — 빈 답변·공백만이면 '무응답'으로 본다.
+
+    답변을 건너뛴(control:next 로 넘긴) 턴은 answer='' 로 기록되므로, 강점·평가를
+    이 무응답 턴에서 지어내지 않도록 판별 기준을 한 곳에 둔다.
+    """
+    return bool(turn.answer.strip())
+
+
+def has_any_answer(history: tuple[Turn, ...]) -> bool:
+    """면접 기록에 실질 답변이 하나라도 있는지(전부 무응답이면 False).
+
+    전부 무응답이면 리포트 LLM 을 호출하지 않고 빈 결과로 우회한다 — 없는 강점·
+    점수를 지어내지 않고, 빌린 OpenAI 키도 낭비하지 않는다.
+    """
+    return any(is_answered(turn) for turn in history)
+
+
 def format_history(history: tuple[Turn, ...]) -> str:
-    """누적 턴을 LLM 요약·리포트 입력용 텍스트로 직렬화한다(요약·결과 공용 공개 헬퍼)."""
+    """누적 턴을 LLM 요약·리포트 입력용 텍스트로 직렬화한다(요약·결과 공용 공개 헬퍼).
+
+    무응답 턴은 답변을 '(무응답)'으로 명시해, LLM 이 빈 답변을 그럴듯한 답으로
+    오해해 강점·점수를 지어내지 않게 한다(정직한 입력 — 근거 없는 평가 차단).
+    """
     blocks = [
-        f'Q{i}: {turn.question}\nA{i}: {turn.answer}\n평가{i}: {turn.evaluation}'
+        f'Q{i}: {turn.question}\nA{i}: {turn.answer.strip() or "(무응답)"}\n평가{i}: {turn.evaluation}'
         for i, turn in enumerate(history, start=1)
     ]
     return '\n\n'.join(blocks)

@@ -128,3 +128,34 @@ def test_default_grade_thresholds():
     assert result_builder._default_grade(95) == 'A'
     assert result_builder._default_grade(82) == 'B+'
     assert result_builder._default_grade(40) == 'D'
+
+
+def test_unanswered_turn_forces_no_answer_eval_over_llm():
+    """무응답 턴은 LLM 이 높은 점수·'잘한 점'을 줘도 결정론적으로 무응답 평가로 덮는다."""
+    history = (
+        Turn('자기소개 해주세요', '', '', 'common'),  # 무응답
+        Turn('지원 동기는?', '브랜드가 좋아서', '구체성 부족', 'company'),
+    )
+    report = {
+        'script': [
+            # LLM 이 무응답 턴에 가짜 호평을 줘도 무시돼야 한다
+            {'no': 1, 'score': 90, 'good': '논리적으로 훌륭함', 'improve': '없음'},
+            {'no': 2, 'score': 70, 'good': '열정', 'improve': '구체화'},
+        ],
+    }
+    result = result_builder.build_result(meta=_meta(), history=history, report=report)
+    assert result.script[0].evaluation.score == 0
+    assert result.script[0].evaluation.good == ''
+    assert '답변이 없어' in result.script[0].evaluation.improve
+    # 답변한 턴은 LLM 평가를 그대로 반영한다
+    assert result.script[1].evaluation.score == 70
+    assert result.script[1].evaluation.good == '열정'
+
+
+def test_whitespace_only_answer_treated_as_no_answer():
+    """공백만 있는 답변도 무응답으로 보고 가짜 평가를 막는다."""
+    history = (Turn('q', '   ', '', 'common'),)
+    report = {'script': [{'no': 1, 'score': 88, 'good': '좋음', 'improve': 'x'}]}
+    result = result_builder.build_result(meta=_meta(), history=history, report=report)
+    assert result.script[0].evaluation.score == 0
+    assert result.script[0].evaluation.good == ''
