@@ -146,6 +146,12 @@ class QuestionEvent(CamelModel):
     kind: Literal['main', 'follow_up'] = 'main'
     # 면접의 마지막 질문 여부 — 답변 후 프론트 버튼을 "결과 보기"로 바꾸고 summary 로 이어진다.
     is_last: bool = False
+    # 이 질문을 던진 면접관(3인 패널) — 프론트가 질문 배지·TTS 목소리에 쓴다.
+    # persona_id=안정 식별자, role_label=화면 노출 이름(예 '인사담당자'), voice=목소리 힌트.
+    # 구버전·mock 경로(persona 미지정)면 빈 문자열로 내려간다(하위호환).
+    persona_id: str = ''      # → JSON: "personaId"
+    role_label: str = ''      # → JSON: "roleLabel"
+    voice: str = ''           # → JSON: "voice"
 
 
 class TranscriptDeltaEvent(CamelModel):

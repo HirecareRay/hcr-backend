@@ -18,6 +18,7 @@ from openai.types.chat import ChatCompletionMessageParam
 
 from app.core.config import settings
 from app.interview import prompts
+from app.interview.personas import Persona
 
 logger = logging.getLogger(__name__)
 
@@ -57,17 +58,22 @@ async def _complete(messages: list[dict[str, str]]) -> str:
 
 
 async def generate_main_questions(
-    company_context: str, user_context: str, job_title: str, count: int
+    company_context: str,
+    user_context: str,
+    job_title: str,
+    personas: list[Persona],
 ) -> list[str]:
-    """회사·지원자·직무 컨텍스트로 메인 면접 질문 목록을 생성한다(빈 줄·중복 제거 후 count 절단).
+    """회사·지원자·직무 컨텍스트로 3인 패널 메인 질문 목록을 생성한다(빈 줄·중복 제거 후 절단).
 
+    personas[i] 가 i번째 질문의 담당 면접관 — 질문 개수는 ``len(personas)`` 다.
     LLM 출력은 신뢰 불가 입력이라 빈 줄·앞뒤 공백·중복 질문을 후처리로 걸러낸다.
-    중복은 dict.fromkeys 로 입력 순서를 유지하며 제거한다. 개수가 count 에 못 미쳐도
-    여기서는 보충하지 않는다 — 기본 질문 보충은 호출부(service)가 담당한다.
+    중복은 dict.fromkeys 로 입력 순서를 유지하며 제거한다. 개수가 부족해도 여기서는
+    보충하지 않는다 — 기본 질문 보충은 호출부(service)가 담당한다.
     """
+    count = len(personas)
     text = await _complete(
         prompts.main_questions_messages(
-            company_context, user_context, job_title, count
+            company_context, user_context, job_title, personas
         )
     )
     lines = (line.strip() for line in text.splitlines() if line.strip())
@@ -75,9 +81,9 @@ async def generate_main_questions(
     return questions[:count]
 
 
-async def generate_follow_up(question: str, answer: str) -> str:
-    """직전 질문·답변을 바탕으로 꼬리질문 한 문장을 생성한다."""
-    return await _complete(prompts.follow_up_messages(question, answer))
+async def generate_follow_up(question: str, answer: str, persona: Persona) -> str:
+    """직전 질문·답변으로 담당 면접관(persona) 말투의 꼬리질문 한 문장을 생성한다."""
+    return await _complete(prompts.follow_up_messages(question, answer, persona))
 
 
 async def stream_evaluation(question: str, answer: str) -> AsyncIterator[str]:

@@ -114,6 +114,19 @@ def test_ws_sends_generated_main_question_on_connect(monkeypatch):
     assert data['ttsText'] == '자기소개를 부탁드립니다'  # camelCase 직렬화 확인
 
 
+def test_ws_first_question_carries_interviewer_persona(monkeypatch):
+    """첫 질문(m0)에 담당 면접관(인사담당자) 필드가 camelCase 로 실려 내려온다."""
+    _patch_llm(monkeypatch, main_questions=['자기소개를 부탁드립니다', '강점은?'])
+
+    with client.websocket_connect(_ws_url()) as ws:
+        data = ws.receive_json()
+
+    # Q1 은 진행자(인사담당자) 담당 — 프론트 배지·TTS 목소리 매핑에 쓴다.
+    assert data['personaId'] == 'culture_fit'
+    assert data['roleLabel'] == '인사담당자'
+    assert data['voice'] == 'soft_high'
+
+
 def test_ws_connect_with_company_id_still_returns_first_question(monkeypatch):
     """유효 티켓+companyId 쿼리를 받아도 DB 미연결 환경에선 기본 질문으로 첫 질문이 나온다."""
     _patch_llm(monkeypatch, main_questions=['자기소개를 부탁드립니다', '강점은?'])

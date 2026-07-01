@@ -29,6 +29,7 @@ from app.auth.security import decode_access_token
 from app.core.config import settings
 from app.db.mongo import get_mongo_db
 from app.interview import result_service, service, ws_origin, ws_ticket
+from app.interview.personas import CULTURE, Persona
 from app.interview.result_schemas import InterviewHistoryList, InterviewResult
 from app.interview.schemas import (
     ControlAction,
@@ -89,6 +90,9 @@ class _WsSession:
     """
 
     main_questions: tuple[str, ...] = ()
+    # main_questions 와 인덱스 1:1 병렬인 담당 면접관(3인 패널). personas[i] 가
+    # main_questions[i] 를 던진 면접관 — 그 질문의 꼬리질문도 같은 면접관이 이어간다.
+    personas: tuple[Persona, ...] = ()
     main_index: int = 0
     awaiting_followup: bool = False
     # 회사·지원자문서·직무 중 하나라도 있어 개인화 질문을 만들었는지. False(순수 폴백,
@@ -130,6 +134,17 @@ class _WsSession:
 async def _send(websocket: WebSocket, event: BaseModel) -> None:
     """다운스트림 이벤트를 camelCase JSON 으로 송신한다."""
     await websocket.send_json(event.model_dump(by_alias=True))
+
+
+def _persona_at(session: _WsSession, index: int) -> Persona:
+    """index 슬롯의 담당 면접관을 안전하게 얻는다(범위 밖이면 진행자 CULTURE 폴백).
+
+    실 경로는 personas 가 main_questions 와 같은 길이라 항상 맞지만, personas 를
+    생략한 mock(구버전 MainQuestionSet)에도 면접이 끊기지 않게 폴백을 둔다.
+    """
+    if 0 <= index < len(session.personas):
+        return session.personas[index]
+    return CULTURE
 
 
 @router.post(
@@ -365,6 +380,7 @@ async def interview_ws(websocket: WebSocket, session_id: str) -> None:
     first = questions[0]
     session = _WsSession(
         main_questions=tuple(questions),
+        personas=tuple(question_set.personas),
         personalized=question_set.personalized,
         current_question=first,
         user_id=user_id,
@@ -374,7 +390,12 @@ async def interview_ws(websocket: WebSocket, session_id: str) -> None:
     )
     # 질문이 1개뿐이면 첫 질문 m0 가 곧 마지막이다(is_last).
     is_last = len(questions) == 1
-    await _send(websocket, service.question_event('m0', first, is_last=is_last))
+    await _send(
+        websocket,
+        service.question_event(
+            'm0', first, is_last=is_last, persona=_persona_at(session, 0)
+        ),
+    )
 
     try:
         while True:
@@ -596,12 +617,16 @@ async def _try_follow_up(
     if not session.history:
         return None
     last = session.history[-1]
-    text = await service.generate_follow_up(last.question, last.answer)
+    # 꼬리질문은 그 메인질문을 던진 면접관(personas[main_index])이 이어간다.
+    persona = _persona_at(session, session.main_index)
+    text = await service.generate_follow_up(last.question, last.answer, persona)
     if not text:
         return None
     await _send(
         websocket,
-        service.question_event(f'f{session.main_index}', text, kind='follow_up'),
+        service.question_event(
+            f'f{session.main_index}', text, kind='follow_up', persona=persona
+        ),
     )
     return replace(session, current_question=text, awaiting_followup=True)
 
@@ -617,7 +642,13 @@ async def _next_main_or_summary(
         # 안 붙으므로, 이 답변의 next 가 곧장 요약으로 이어진다.
         is_last = next_index == len(session.main_questions) - 1
         await _send(
-            websocket, service.question_event(f'm{next_index}', text, is_last=is_last)
+            websocket,
+            service.question_event(
+                f'm{next_index}',
+                text,
+                is_last=is_last,
+                persona=_persona_at(session, next_index),
+            ),
         )
         return replace(
             session,
