@@ -121,3 +121,104 @@ def test_get_result_by_id_returns_owner_result(monkeypatch):
         _teardown()
     assert res.status_code == 200
     assert res.json()['meta']['resultId'] == 'r1'
+
+
+# --- 마이페이지 세션 기록 목록/상세 (GET /interviews/sessions/*) ---
+
+
+def _session_doc(user_id='u1', company_id='c1', overall=78):
+    """저장 문서 1건(목록 요약 입력) — user_id + 완성 result."""
+    return {'user_id': user_id, 'result': _result_dump(company_id=company_id, overall=overall)}
+
+
+def test_session_history_requires_auth():
+    app.dependency_overrides[get_mongo_db] = lambda: object()
+    try:
+        res = client.get('/interviews/sessions/history')
+    finally:
+        _teardown()
+    assert res.status_code == 401
+
+
+def test_session_history_empty_is_ok_not_404(monkeypatch):
+    _auth_as(monkeypatch, 'u1')
+    monkeypatch.setattr(result_repository, 'find_all_by_user', Mock(return_value=[]))
+    try:
+        res = client.get(
+            '/interviews/sessions/history', headers={'Authorization': 'Bearer x'}
+        )
+    finally:
+        _teardown()
+    assert res.status_code == 200
+    assert res.json() == {'items': [], 'total': 0}
+
+
+def test_session_history_summarizes_camel_and_preserves_order(monkeypatch):
+    _auth_as(monkeypatch, 'u1')
+    # 리포지토리가 최신순(created_at DESC)으로 준 순서를 그대로 보존해야 한다.
+    docs = [_session_doc(company_id='newer', overall=90), _session_doc(company_id='older', overall=60)]
+    monkeypatch.setattr(result_repository, 'find_all_by_user', Mock(return_value=docs))
+    try:
+        res = client.get(
+            '/interviews/sessions/history', headers={'Authorization': 'Bearer x'}
+        )
+    finally:
+        _teardown()
+    assert res.status_code == 200
+    body = res.json()
+    assert body['total'] == 2
+    first = body['items'][0]
+    assert first['companyId'] == 'newer'  # 최신순 보존 + camelCase
+    assert first['score'] == 90
+    assert set(first) >= {
+        'resultId', 'companyId', 'companyName', 'jobTitle',
+        'conductedAt', 'mode', 'score', 'grade', 'headline', 'questionCount',
+    }
+
+
+def test_session_history_labels_general_when_no_company(monkeypatch):
+    _auth_as(monkeypatch, 'u1')
+    doc = _session_doc(company_id='')  # 회사 미지정 일반 면접
+    monkeypatch.setattr(result_repository, 'find_all_by_user', Mock(return_value=[doc]))
+    try:
+        res = client.get(
+            '/interviews/sessions/history', headers={'Authorization': 'Bearer x'}
+        )
+    finally:
+        _teardown()
+    item = res.json()['items'][0]
+    assert item['companyId'] == 'general'
+    assert item['companyName'] == '일반 면접'
+
+
+def test_session_detail_rejects_non_owner(monkeypatch):
+    _auth_as(monkeypatch, 'intruder')
+    monkeypatch.setattr(
+        result_repository,
+        'find_by_id',
+        Mock(return_value={'user_id': 'owner', 'result': _result_dump()}),
+    )
+    try:
+        res = client.get(
+            '/interviews/sessions/r1', headers={'Authorization': 'Bearer x'}
+        )
+    finally:
+        _teardown()
+    assert res.status_code == 404  # 남의 세션은 없는 것처럼 차단
+
+
+def test_session_detail_returns_owner_result(monkeypatch):
+    _auth_as(monkeypatch, 'owner')
+    monkeypatch.setattr(
+        result_repository,
+        'find_by_id',
+        Mock(return_value={'user_id': 'owner', 'result': _result_dump()}),
+    )
+    try:
+        res = client.get(
+            '/interviews/sessions/r1', headers={'Authorization': 'Bearer x'}
+        )
+    finally:
+        _teardown()
+    assert res.status_code == 200
+    assert res.json()['meta']['resultId'] == 'r1'

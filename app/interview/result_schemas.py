@@ -138,3 +138,36 @@ class InterviewResult(CamelModel):
     script: list[ScriptItem] = Field(default_factory=list)
     recommended_questions: RecommendedQuestions
     comparison: InterviewComparison | None = None
+
+
+class InterviewHistoryItem(CamelModel):
+    """마이페이지 "AI 면접 기록" 카드 한 장 — 저장된 세션 결과의 meta+overall 요약.
+
+    상세(InterviewResult)의 축약본이다 — 목록 화면 카드 미리보기용이라 점수·등급·
+    한 줄 총평만 담고, 카드 클릭 시 result_id 로 상세를 조회한다(계약 ②). 새 계산 없이
+    저장된 완성품에서 뽑는다(계약 ④ — 재조회 시 LLM 재호출 0).
+
+    company_id·company_name 은 일반 면접(회사 미지정)이면 'general'·'일반 면접'으로
+    라벨링한다(서비스에서 매핑) — 프론트 카드가 회사 없는 세션도 표시할 수 있게.
+    """
+
+    result_id: str
+    company_id: str
+    company_name: str
+    job_title: str
+    conducted_at: str  # ISO 8601 문자열
+    mode: InterviewMode
+    score: int = Field(ge=0, le=100)
+    grade: str
+    headline: str
+    question_count: int
+
+
+class InterviewHistoryList(CamelModel):
+    """면접 기록 목록 응답 — 최신순 카드 배열 + 전체 세션 수(페이지네이션 대비).
+
+    기록이 없으면 items=[]·total=0 (빈 목록은 정상 — 404 아님).
+    """
+
+    items: list[InterviewHistoryItem] = Field(default_factory=list)
+    total: int
