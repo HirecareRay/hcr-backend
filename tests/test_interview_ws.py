@@ -171,7 +171,9 @@ def test_ws_ticket_personalizes_and_is_consumed(monkeypatch):
     ):
         captured['company_id'] = company_id
         captured['user_id'] = user_id
-        return ['자기소개를 부탁드립니다', '강점은?']
+        return service.MainQuestionSet(
+            ['자기소개를 부탁드립니다', '강점은?'], personalized=True
+        )
 
     monkeypatch.setattr(service, 'build_main_questions', _capture)
 
@@ -195,7 +197,9 @@ def test_ws_passes_job_title_query_to_question_builder(monkeypatch):
         count, *, company_id=None, user_id=None, job_title=None, db=None, mongo=None
     ):
         captured['job_title'] = job_title
-        return ['자기소개를 부탁드립니다', '강점은?']
+        return service.MainQuestionSet(
+            ['자기소개를 부탁드립니다', '강점은?'], personalized=True
+        )
 
     monkeypatch.setattr(service, 'build_main_questions', _capture)
 
@@ -337,6 +341,34 @@ def test_ws_next_after_followup_answer_advances_to_next_main(monkeypatch):
         _drain(ws, 3)
         ws.send_json({'type': 'control', 'action': 'next'})
         assert ws.receive_json()['questionId'] == 'm1'
+
+
+def test_ws_fallback_session_skips_follow_up(monkeypatch):
+    """순수 폴백(컨텍스트 전무) 면접은 꼬리질문 없이 곧장 다음 메인으로 넘어간다.
+
+    build_main_questions 가 personalized=False 를 주면, 메인 답변 뒤 next 에서
+    꼬리질문 LLM 을 호출하지 않고(비용 0) m1 로 진행한다.
+    """
+    _patch_llm(monkeypatch)
+
+    async def _fallback(count, **kwargs):
+        return service.MainQuestionSet(
+            ['자기소개 부탁드립니다', '지원 동기는?'], personalized=False
+        )
+
+    monkeypatch.setattr(service, 'build_main_questions', _fallback)
+
+    with client.websocket_connect(_ws_url()) as ws:
+        assert ws.receive_json()['questionId'] == 'm0'
+        ws.send_bytes(b'audio')
+        ws.send_json({'type': 'control', 'action': 'answer_end'})
+        _drain(ws, 3)  # transcript + eval 2
+        ws.send_json({'type': 'control', 'action': 'next'})
+        nxt = ws.receive_json()
+
+    # 꼬리질문(f0) 없이 곧장 다음 메인 — 꼬리질문 LLM 은 호출되지 않는다.
+    assert nxt['questionId'] == 'm1'
+    llm.generate_follow_up.assert_not_awaited()
 
 
 def test_ws_single_question_first_is_last(monkeypatch):

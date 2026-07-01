@@ -108,7 +108,11 @@ def test_warn_once_if_dev_mode_silent_in_prod(monkeypatch, caplog):
 
 def _stub_questions(monkeypatch) -> AsyncMock:
     """build_main_questions 를 mock 해 유효 연결이 첫 질문까지 진행하게 한다(LLM 미호출)."""
-    build = AsyncMock(return_value=['자기소개를 부탁드립니다', '강점은?'])
+    build = AsyncMock(
+        return_value=service.MainQuestionSet(
+            ['자기소개를 부탁드립니다', '강점은?'], personalized=True
+        )
+    )
     monkeypatch.setattr(service, 'build_main_questions', build)
     return build
 
