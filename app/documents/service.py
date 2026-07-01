@@ -19,7 +19,6 @@ base_rule = """
 3. 띄어쓰기 자동 수정
 4. 날짜 형식 통일
 
-YYYY-MM-DD HH:mm:SS
 YYYY-MM-DD
 YYYY-MM
 YYYY
