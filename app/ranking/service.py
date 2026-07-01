@@ -121,19 +121,34 @@ def get_trending(
 ) -> list[dict]:
     """최근 window_days 일 조회수 상위 회사 → TrendingCompany 카드 리스트.
 
-    조회수 데이터가 비면(콜드 스타트) 회사 시드로 폴백해 빈 피드를 막는다.
-    메타가 없는 id(삭제된 회사 등)는 건너뛰고 rank 는 1 부터 빈틈없이 다시 매긴다.
+    실집계가 limit 보다 적으면(콜드 스타트·데이터 부족) 회사 시드로 부족분만 채워
+    항상 limit 개수를 맞춘다(공개 홈 피드라 빈 슬롯을 안 보인다). 메타가 없거나
+    이름이 빈 회사(삭제·메타 깨짐)는 제외하고, 시드는 이미 든 회사와 company_id
+    기준으로 중복 제거한다. rank 는 패딩까지 끝난 뒤 1 부터 빈틈없이 다시 매긴다.
     """
     since = date.today() - timedelta(days=window_days - 1)
     ranked = repository.top_company_views(db, since, limit)
     ids = [cid for cid, _ in ranked]
 
-    if ids:
-        meta = repository.find_company_meta(mongo, ids)
-        ordered = [(cid, meta[cid]) for cid in ids if cid in meta]
-    else:
-        ordered = [(str(c["_id"]), c) for c in repository.find_seed_companies(mongo, limit)]
+    def _has_name(m: dict) -> bool:
+        return bool(str(m.get("company_name") or "").strip())
 
-    # 이름 없는 회사는 rank 부여 전에 제외 — rank 가 1부터 빈틈없이 매겨지도록(min 1 보장)
-    named = [(cid, m) for cid, m in ordered if str(m.get("company_name") or "").strip()]
-    return [_card(i + 1, cid, m) for i, (cid, m) in enumerate(named)]
+    # 1) 실집계 — 메타 없는/이름 없는 회사는 제외(rank 가 빈틈없이 매겨지도록)
+    meta = repository.find_company_meta(mongo, ids) if ids else {}
+    ordered = [(cid, meta[cid]) for cid in ids if cid in meta and _has_name(meta[cid])]
+
+    # 2) 부족분을 회사 시드로 패딩 — 이미 든 회사(company_id)는 빼고 채운다.
+    #    중복·이름없음으로 깎일 수 있어 넉넉히 받아 부족분만 추린다.
+    if len(ordered) < limit:
+        seen = {cid for cid, _ in ordered}
+        for c in repository.find_seed_companies(mongo, limit + len(seen)):
+            cid = str(c["_id"])
+            if cid in seen or not _has_name(c):
+                continue
+            seen.add(cid)
+            ordered.append((cid, c))
+            if len(ordered) >= limit:
+                break
+
+    # 3) limit 으로 자르고 rank 를 1..N 으로 재부여(오름차순 유지)
+    return [_card(i + 1, cid, m) for i, (cid, m) in enumerate(ordered[:limit])]
