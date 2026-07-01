@@ -160,12 +160,43 @@ def test_get_trending_enriches_and_ranks(db, mongo):
 
 
 def test_get_trending_cold_start_falls_back_to_seed(db, mongo):
-    # 조회수 데이터 0건 → 회사 시드로 폴백(빈 피드 방지)
+    # 조회수 데이터 0건 → 회사 시드로 폴백(빈 피드 방지). 시드가 1개뿐이라 1개.
     _seed_company(mongo, CID_A, "시드회사")
     cards = service.get_trending(db, mongo, limit=5, window_days=7)
     assert len(cards) == 1
     assert cards[0]["rank"] == 1
     assert cards[0]["company_id"] == CID_A
+
+
+def test_get_trending_pads_partial_data_with_seed(db, mongo):
+    # 실집계가 limit 보다 적으면 시드로 부족분을 채워 limit 개수를 맞춘다.
+    today = date.today()
+    repository.increment_view(db, CID_A, today)  # 실데이터 1개
+    db.commit()
+    _seed_company(mongo, CID_A, "실데이터회사")
+    _seed_company(mongo, CID_B, "시드비")
+    _seed_company(mongo, CID_C, "시드씨")
+
+    cards = service.get_trending(db, mongo, limit=3, window_days=7)
+    assert len(cards) == 3
+    assert [c["rank"] for c in cards] == [1, 2, 3]      # rank 연속 재부여
+    assert cards[0]["company_id"] == CID_A              # 실데이터가 먼저
+    ids = [c["company_id"] for c in cards]
+    assert len(set(ids)) == 3                           # company_id 중복 없음
+
+
+def test_get_trending_pad_dedups_seed_overlap(db, mongo):
+    # 실데이터 회사가 시드에도 있으면 시드 패딩에서 중복 제거된다.
+    today = date.today()
+    repository.increment_view(db, CID_A, today)
+    db.commit()
+    _seed_company(mongo, CID_A, "겹치는회사")  # 실데이터이자 시드
+    _seed_company(mongo, CID_B, "시드비")
+
+    cards = service.get_trending(db, mongo, limit=5, window_days=7)
+    ids = [c["company_id"] for c in cards]
+    assert ids == [CID_A, CID_B]              # CID_A 가 두 번 들어가지 않음
+    assert [c["rank"] for c in cards] == [1, 2]
 
 
 def test_get_trending_skips_company_missing_meta(db, mongo):
