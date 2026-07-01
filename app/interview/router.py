@@ -298,7 +298,9 @@ async def interview_ws(websocket: WebSocket, session_id: str) -> None:
         job_title=job_title,
         started_at=started_at,
     )
-    await _send(websocket, service.question_event('m0', first))
+    # 질문이 1개뿐이면 첫 질문 m0 가 곧 마지막이다(is_last).
+    is_last = len(questions) == 1
+    await _send(websocket, service.question_event('m0', first, is_last=is_last))
 
     try:
         while True:
@@ -497,8 +499,14 @@ async def _transcribe(websocket: WebSocket, session: _WsSession) -> str:
 
 
 async def _advance(websocket: WebSocket, session: _WsSession) -> _WsSession:
-    """다음 전이 — 메인 답변 직후엔 꼬리질문, 꼬리 답변 직후엔 다음 메인/요약."""
-    if not session.awaiting_followup:
+    """다음 전이 — 메인 답변 직후엔 꼬리질문, 꼬리 답변 직후엔 다음 메인/요약.
+
+    단, 현재가 마지막 메인이면 꼬리질문을 붙이지 않는다 — 그래야 질문 전송 시점에
+    "이게 진짜 마지막(is_last)"임을 결정적으로 확정할 수 있고, 마지막 답변의 next 가
+    곧장 요약으로 이어진다(프론트 "결과 보기" 흐름과 일치).
+    """
+    is_last_main = session.main_index >= len(session.main_questions) - 1
+    if not session.awaiting_followup and not is_last_main:
         followed = await _try_follow_up(websocket, session)
         if followed is not None:
             return followed
@@ -529,7 +537,12 @@ async def _next_main_or_summary(
     next_index = session.main_index + 1
     if next_index < len(session.main_questions):
         text = session.main_questions[next_index]
-        await _send(websocket, service.question_event(f'm{next_index}', text))
+        # 이 다음 메인이 마지막이면 is_last 로 실어 보낸다 — 이후 꼬리질문은 (a) 규칙상
+        # 안 붙으므로, 이 답변의 next 가 곧장 요약으로 이어진다.
+        is_last = next_index == len(session.main_questions) - 1
+        await _send(
+            websocket, service.question_event(f'm{next_index}', text, is_last=is_last)
+        )
         return replace(
             session,
             main_index=next_index,
