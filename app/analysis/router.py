@@ -22,14 +22,11 @@ async def _user_id(cred: HTTPAuthorizationCredentials = Depends(_bearer)) -> str
 
 class FitRequest(BaseModel):
     company_id: str
-    job_title: str
-    responsibilities: list[str] = []
-    requirements: list[str] = []
-    preferred_qualifications: list[str] = []
+    job_posting_id: str
 
 
 @router.post("/fit")
-def analyze_fit(
+async def analyze_fit(
     request: Request,
     body: FitRequest,
     user_id: str = Depends(_user_id),
@@ -37,10 +34,12 @@ def analyze_fit(
 ):
     mongo = get_mongo_db(request)
     try:
-        result = service.analyze_fit(db, mongo, user_id, body.model_dump())
+        result = await service.analyze_fit(db, mongo, user_id, body.job_posting_id, body.company_id)
         return {"success": True, "data": result}
     except service.NoDocumentsFound:
         raise HTTPException(
             status_code=404,
-            detail="분석할 서류가 없습니다. 마이페이지에서 이력서를 등록해 주세요.",
+            detail="이력서가 없습니다. 마이페이지에서 이력서를 등록해 주세요.",
         )
+    except service.JobPostingNotFound:
+        raise HTTPException(status_code=404, detail="채용공고를 찾을 수 없습니다.")
