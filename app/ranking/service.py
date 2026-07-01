@@ -2,7 +2,9 @@
 
 조회수 적재(record_view)와 순위 조립(get_trending)을 담당한다. 순위는 MariaDB
 조회수 합산 상위 회사 id 를 뽑아 MongoDB 회사 메타(이름·업종)로 보강하고, 카드용
-파생값(logoText 이니셜·logoColor)을 붙여 프론트 TrendingCompany 형태로 만든다.
+파생값(logoText 이니셜·logoColor·logoUrl)을 붙여 프론트 TrendingCompany 형태로
+만든다. logoUrl 은 큐레이션(logo_url) 우선, 없으면 website_url 도메인으로 CDN 로고
+URL 을 산출한다(없으면 None - 프론트는 logoText/logoColor 이니셜 원으로 폴백).
 라우터는 여기로 위임하고, 여기서만 repository(MariaDB + MongoDB)를 조합한다.
 """
 
@@ -11,10 +13,12 @@ import logging
 import re
 from collections.abc import Callable
 from datetime import date, timedelta
+from urllib.parse import urlparse
 
 from pymongo.database import Database
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.ranking import repository
 
 logger = logging.getLogger(__name__)
@@ -39,6 +43,43 @@ def _logo_color(company_id: str) -> str:
     return _LOGO_COLORS[int(digest, 16) % len(_LOGO_COLORS)]
 
 
+def _domain(url: str | None) -> str | None:
+    """URL/문자열에서 호스트 도메인만 뽑는다 - scheme 없는 값도 처리.
+
+    예: "https://www.cj.net" -> "cj.net", "www.cj.net/about" -> "cj.net".
+    urlparse 는 scheme 가 없으면 netloc 을 못 채우므로, 비면 path 첫 토큰을 쓴다.
+    앞의 "www." 는 떼고, 포트(":8080")가 붙으면 떼고, 공백/빈값이면 None.
+    """
+    raw = (url or "").strip()
+    if not raw:
+        return None
+    parsed = urlparse(raw)
+    host = parsed.netloc or parsed.path.split("/", 1)[0]
+    host = host.strip().lower().split(":", 1)[0]  # 포트 제거
+    if host.startswith("www."):
+        host = host[4:]
+    return host or None
+
+
+def _logo_url(meta: dict) -> str | None:
+    """회사 메타 -> 로고 이미지 URL(문자열) 또는 None.
+
+    1) logo_url 큐레이션 값이 있으면(strip 후 비지 않으면) 그대로 쓴다.
+    2) 없으면 website_url 도메인으로 Google favicon URL(f"{base}?domain={d}&sz={n}")을 만든다.
+       base(settings.ranking_logo_cdn_base)가 빈 문자열이면 자동 산출을 끄고 None.
+    """
+    curated = str(meta.get("logo_url") or "").strip()
+    if curated:
+        return curated
+    base = settings.ranking_logo_cdn_base.strip().rstrip("/")  # 끝 슬래시 정규화
+    if not base:
+        return None
+    domain = _domain(meta.get("website_url"))
+    if not domain:
+        return None
+    return f"{base}?domain={domain}&sz={settings.ranking_logo_size}"
+
+
 def _card(rank: int, company_id: str, meta: dict) -> dict:
     """회사 메타 → TrendingCompany 카드 dict(snake_case, 스키마가 camel 로 직렬화)."""
     name = str(meta.get("company_name") or "").strip()
@@ -49,6 +90,7 @@ def _card(rank: int, company_id: str, meta: dict) -> dict:
         "parent_name": str(meta.get("industry") or "").strip(),  # 부제 슬롯(실값=업종)
         "logo_text": _logo_text(name),
         "logo_color": _logo_color(company_id),
+        "logo_url": _logo_url(meta),
     }
 
 
