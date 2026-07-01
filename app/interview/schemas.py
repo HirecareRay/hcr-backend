@@ -144,6 +144,8 @@ class QuestionEvent(CamelModel):
     tts_text: str | None = None
     # 메인(기본) 질문인지 직전 답변 기반 꼬리질문인지 — 프론트 배지·흐름 표시용.
     kind: Literal['main', 'follow_up'] = 'main'
+    # 면접의 마지막 질문 여부 — 답변 후 프론트 버튼을 "결과 보기"로 바꾸고 summary 로 이어진다.
+    is_last: bool = False
 
 
 class TranscriptDeltaEvent(CamelModel):
