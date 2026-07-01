@@ -134,13 +134,16 @@ def _script(history: tuple[Turn, ...], data: object) -> list[ScriptItem]:
     items: list[ScriptItem] = []
     for index, turn in enumerate(history, start=1):
         raw = by_no.get(index, {})
+        # 무응답 턴은 LLM 평가를 신뢰하지 않고 결정론적으로 '무응답'으로 둔다 —
+        # 답변이 없는데 "잘한 점"을 지어내지 않는다(부분 스킵도 안전).
+        evaluation = _no_answer_eval() if not turn.answer.strip() else _eval(raw)
         items.append(
             ScriptItem(
                 no=index,
                 category=_category(_str(raw.get('category')) or turn.category),
                 question=turn.question,
                 answer=turn.answer,
-                evaluation=_eval(raw),
+                evaluation=evaluation,
             )
         )
     return items
@@ -172,6 +175,11 @@ def _eval(raw: dict) -> ScriptEvaluation:
 def _empty_eval() -> ScriptEvaluation:
     """LLM 평가가 매칭되지 않은 턴의 안전 기본 평가."""
     return ScriptEvaluation(score=0, good='', improve='평가를 생성하지 못했습니다.')
+
+
+def _no_answer_eval() -> ScriptEvaluation:
+    """무응답(빈 답변) 턴의 결정론적 평가 — 없는 '잘한 점'을 지어내지 않는다."""
+    return ScriptEvaluation(score=0, good='', improve='답변이 없어 평가할 수 없습니다.')
 
 
 def _recommended(data: object) -> RecommendedQuestions:

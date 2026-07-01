@@ -143,8 +143,11 @@ def report_messages(transcript: str, job_title: str) -> list[dict[str, str]]:
         '- script 는 면접 기록의 각 턴(no=질문 순서, 1부터)마다 하나씩 만들고, '
         'category 는 회사 특정 질문이면 "company", 직무 역량 질문이면 "job", '
         '일반 질문이면 "common" 으로 분류합니다.\n'
-        '- strengths·weaknesses 는 각 2~4개, improvements 는 2~3개, '
-        'recommended_questions 의 company·job 은 각 3~4개로 만듭니다.\n'
+        '- 답변이 "(무응답)"이거나 부실한 턴은 score 를 0 으로 두고 good 은 비우며, '
+        'improve·weaknesses 에만 답변이 없었음을 반영합니다.\n'
+        '- strengths·weaknesses 는 실제 답변에 근거가 있을 때만 각 최대 4개로 만들고, '
+        '근거가 없으면(전부 무응답·부실) 억지로 지어내지 말고 빈 배열([])로 둡니다. '
+        'improvements 는 최대 3개, recommended_questions 의 company·job 은 각 3~4개로 만듭니다.\n'
         '- JSON 외의 어떤 텍스트도 출력하지 마세요.'
     )
     return [
