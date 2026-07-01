@@ -102,14 +102,19 @@ def _ensure_question_count(questions: list[str], count: int) -> list[str]:
 
 
 def question_event(
-    question_id: str, text: str, kind: Literal['main', 'follow_up'] = 'main'
+    question_id: str,
+    text: str,
+    kind: Literal['main', 'follow_up'] = 'main',
+    is_last: bool = False,
 ) -> QuestionEvent:
     """질문 문자열을 다운스트림 이벤트로 감싼다(TTS 텍스트는 동일).
 
     kind 는 메인(기본) 질문인지 꼬리질문인지 — 프론트가 흐름을 표시하는 데 쓴다.
+    is_last 는 면접의 마지막 질문 여부 — 프론트가 답변 후 버튼을 "결과 보기"로
+    바꾸고 그 답변의 next 에서 summary 를 기대한다.
     """
     return QuestionEvent(
-        question_id=question_id, text=text, tts_text=text, kind=kind
+        question_id=question_id, text=text, tts_text=text, kind=kind, is_last=is_last
     )
 
 
