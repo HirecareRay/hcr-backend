@@ -29,6 +29,8 @@ from app.interview.nonverbal import NonverbalMetrics
 from app.interview.result_schemas import (
     DeltaDirection,
     InterviewComparison,
+    InterviewHistoryItem,
+    InterviewHistoryList,
     InterviewMode,
     InterviewResult,
     MetricDelta,
@@ -322,6 +324,61 @@ def get_result_by_id(
     if document is None or document.get('user_id') != user_id:
         return None
     return _restore(document)
+
+
+_GENERAL_COMPANY_ID = 'general'
+_GENERAL_COMPANY_NAME = '일반 면접'
+
+
+def list_session_history(mongo: Database, user_id: str) -> InterviewHistoryList:
+    """그 유저의 모든 세션을 최신순 카드 목록으로 요약한다(마이페이지 면접 기록).
+
+    저장된 완성품(result.meta+overall)에서 카드에 필요한 필드만 뽑는다 — 새 계산·LLM
+    재호출 0(계약 ④). 손상돼 요약할 수 없는 문서는 건너뛴다(하나가 목록 전체를 깨지
+    않게). 기록이 없으면 items=[]·total=0 (빈 목록은 정상 — 404 아님).
+    """
+    documents = result_repository.find_all_by_user(mongo, user_id)
+    items = [
+        item for item in (_to_history_item(document) for document in documents)
+        if item is not None
+    ]
+    return InterviewHistoryList(items=items, total=len(items))
+
+
+def _to_history_item(document: dict) -> InterviewHistoryItem | None:
+    """저장 문서 1건을 카드 요약으로 변환한다(형식 오류면 None — 목록에서 제외).
+
+    회사 미지정(company_id 빈값) 세션은 'general'·'일반 면접'으로 라벨링해 프론트
+    카드가 회사 없는 일반 면접도 표시하게 한다.
+    """
+    result = document.get('result')
+    if not isinstance(result, dict):
+        return None
+    meta = result.get('meta')
+    overall = result.get('overall')
+    if not isinstance(meta, dict) or not isinstance(overall, dict):
+        return None
+    try:
+        # 일반 면접(회사 미지정)의 판정 기준은 company_id 부재다 — id 가 비면 회사명이
+        # 남아 있어도 함께 'general'·'일반 면접'으로 라벨링해 카드 표기를 일관화한다.
+        company_id = str(meta.get('company_id') or '').strip()
+        company_name = str(meta.get('company_name') or '').strip()
+        is_general = not company_id
+        return InterviewHistoryItem(
+            result_id=str(meta.get('result_id') or ''),
+            company_id=company_id or _GENERAL_COMPANY_ID,
+            company_name=_GENERAL_COMPANY_NAME if is_general else company_name,
+            job_title=str(meta.get('job_title') or ''),
+            conducted_at=str(meta.get('conducted_at') or ''),
+            mode=meta.get('mode', 'text'),
+            score=int(overall.get('score', 0)),
+            grade=str(overall.get('grade') or ''),
+            headline=str(overall.get('headline') or ''),
+            question_count=int(meta.get('question_count', 0)),
+        )
+    except Exception as error:  # noqa: BLE001 - 손상된 문서가 목록을 깨지 않게
+        logger.error('세션 기록 요약 실패, 항목 제외: %s', error)
+        return None
 
 
 def _restore(document: dict | None) -> InterviewResult | None:
