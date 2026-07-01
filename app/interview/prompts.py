@@ -51,12 +51,21 @@ def main_questions_messages(
 
 
 def follow_up_messages(question: str, answer: str) -> list[dict[str, str]]:
-    """직전 질문·답변을 바탕으로 꼬리질문 하나를 생성하는 메시지."""
+    """직전 질문·답변을 바탕으로 꼬리질문 하나를 생성하는 메시지.
+
+    답변이 부실하면(이름·소속만 말하거나, 너무 짧거나, 질문에 실질적으로 답하지
+    않으면) 억지 꼬리질문을 만들지 않고 정확히 ``SKIP`` 한 단어만 출력하도록 한다 —
+    "홍길동이라는 이름에 대해 더 말해보라" 같은 사소한 단어를 붙드는 헛질문을 막는다.
+    호출부(service.generate_follow_up)가 이 SKIP 를 감지해 꼬리질문을 건너뛴다.
+    """
     system = (
         '당신은 면접관입니다. 지원자의 직전 답변을 듣고 더 깊이 파고드는 '
         '꼬리질문을 하나만 생성하세요. 실제 면접관이 말로 되묻듯 자연스러운 '
         '구어체 한 문장으로, "~에 맞춰"·"~와 연관된" 같은 기계적 표현 없이 '
-        '질문만 출력합니다.'
+        '질문만 출력합니다.\n'
+        '단, 답변이 이름·소속만 말하거나, 너무 짧거나, 질문에 실질적으로 답하지 '
+        '않아 더 파고들 내용이 없으면 억지 질문을 만들지 말고 정확히 SKIP 한 단어만 '
+        '출력하세요. 답변 속 사소한 단어(이름·숫자 등)를 붙들고 늘어지지 마세요.'
     )
     user = f'직전 질문: {question}\n지원자 답변: {answer}'
     return [
@@ -134,8 +143,11 @@ def report_messages(transcript: str, job_title: str) -> list[dict[str, str]]:
         '- script 는 면접 기록의 각 턴(no=질문 순서, 1부터)마다 하나씩 만들고, '
         'category 는 회사 특정 질문이면 "company", 직무 역량 질문이면 "job", '
         '일반 질문이면 "common" 으로 분류합니다.\n'
-        '- strengths·weaknesses 는 각 2~4개, improvements 는 2~3개, '
-        'recommended_questions 의 company·job 은 각 3~4개로 만듭니다.\n'
+        '- 답변이 "(무응답)"이거나 부실한 턴은 score 를 0 으로 두고 good 은 비우며, '
+        'improve·weaknesses 에만 답변이 없었음을 반영합니다.\n'
+        '- strengths·weaknesses 는 실제 답변에 근거가 있을 때만 각 최대 4개로 만들고, '
+        '근거가 없으면(전부 무응답·부실) 억지로 지어내지 말고 빈 배열([])로 둡니다. '
+        'improvements 는 최대 3개, recommended_questions 의 company·job 은 각 3~4개로 만듭니다.\n'
         '- JSON 외의 어떤 텍스트도 출력하지 마세요.'
     )
     return [
