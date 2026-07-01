@@ -40,7 +40,8 @@ _FEEDBACK_HEAD_MOVEMENT = 0.3
 class NonverbalMetrics:
     """집계된 비언어 지표(불변). 모든 필드는 안전 기본값을 가진다."""
 
-    frame_count: int = 0
+    frame_count: int = 0  # 수신한 landmark_frame 수(얼굴 미검출 빈 프레임 포함)
+    detected_frames: int = 0  # 그중 얼굴 신호가 실제로 있던 프레임 수
     gaze_off_ratio: float = 0.0
     head_movement: float = 0.0
     expression_dist: dict[str, float] = field(default_factory=dict)
@@ -48,8 +49,15 @@ class NonverbalMetrics:
 
     @property
     def has_data(self) -> bool:
-        """집계할 신호가 하나라도 있었는지."""
-        return self.frame_count > 0 or bool(self.event_counts)
+        """실제로 집계할 얼굴 신호가 있었는지.
+
+        frame_count(수신 수)가 아니라 detected_frames(얼굴이 잡힌 프레임)로 판정한다 —
+        카메라 가림·미검출로 전 필드 None 인 빈 프레임만 오면 프레임 수는 많아도 신호는 0
+        이므로 False. 그래야 to_modal_feedback 이 빈 모달로 정직하게 비우고, 시선이탈 0%·
+        흔들림 0 을 '완벽'으로 오해해 표정 점수를 가짜로(→만점) 채우지 않는다. 이벤트는
+        그 자체로 실신호라 있으면 True.
+        """
+        return self.detected_frames > 0 or bool(self.event_counts)
 
 
 def aggregate(
@@ -59,10 +67,30 @@ def aggregate(
     """누적된 랜드마크·이벤트를 비언어 지표로 집계한다(결측·빈입력 안전)."""
     return NonverbalMetrics(
         frame_count=len(frames),
+        detected_frames=sum(1 for frame in frames if _frame_has_signal(frame)),
         gaze_off_ratio=_gaze_off_ratio(frames),
         head_movement=_head_movement(frames),
         expression_dist=_expression_dist(frames),
         event_counts=dict(Counter(event.event for event in events)),
+    )
+
+
+def _frame_has_signal(frame: LandmarkFrameMessage) -> bool:
+    """프레임에 실제 얼굴 신호가 하나라도 있는지(전 필드 None = 미검출 = False).
+
+    프론트가 얼굴 미검출 시에도 방어적으로 빈 프레임을 보낼 수 있으므로(계약상 전 필드
+    nullable), 백엔드에서도 '데이터 있음' 판정을 신호 유무로 재확인한다(방어선).
+    """
+    return any(
+        value is not None
+        for value in (
+            frame.gaze_x,
+            frame.gaze_y,
+            frame.head_yaw,
+            frame.head_pitch,
+            frame.head_roll,
+            frame.expression,
+        )
     )
 
 
