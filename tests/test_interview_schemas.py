@@ -106,6 +106,7 @@ def test_downstream_question_serializes_to_camel():
     assert dumped["ttsText"] == "자기소개"
     assert dumped["type"] == "question"  # 판별값은 snake 유지
     assert dumped["kind"] == "main"  # 기본은 메인 질문
+    assert dumped["isLast"] is False  # 기본은 마지막 질문 아님
 
 
 def test_downstream_question_kind_follow_up():
@@ -114,6 +115,13 @@ def test_downstream_question_kind_follow_up():
     )
     dumped = event.model_dump(by_alias=True)
     assert dumped["kind"] == "follow_up"
+
+
+def test_downstream_question_is_last_serializes_to_camel():
+    """마지막 질문은 is_last=True → 프론트로 isLast 로 나간다(버튼 '결과 보기' 전환용)."""
+    event = QuestionEvent(question_id="m3", text="마지막 한마디 부탁드립니다", is_last=True)
+    dumped = event.model_dump(by_alias=True)
+    assert dumped["isLast"] is True
 
 
 def test_downstream_transcript_delta_serializes_to_camel():

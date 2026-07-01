@@ -339,23 +339,71 @@ def test_ws_next_after_followup_answer_advances_to_next_main(monkeypatch):
         assert ws.receive_json()['questionId'] == 'm1'
 
 
+def test_ws_single_question_first_is_last(monkeypatch):
+    """질문이 1개뿐이면 첫 질문 m0 에 isLast=True 가 실린다."""
+    monkeypatch.setattr(settings, 'interview_main_question_count', 1)
+    _patch_llm(monkeypatch, main_questions=['자기소개 부탁드립니다'])
+
+    with client.websocket_connect(_ws_url()) as ws:
+        first = ws.receive_json()
+
+    assert first['questionId'] == 'm0'
+    assert first['isLast'] is True
+
+
+def test_ws_only_last_main_is_last_and_suppresses_follow_up(monkeypatch):
+    """다중 질문: 마지막 메인만 isLast=True, 이전 질문은 False. 마지막 메인 뒤 꼬리질문 없음.
+
+    m0(마지막 아님) → 꼬리질문 f0 → m1(마지막, isLast=True) → next 시 꼬리 없이 곧장 요약.
+    """
+    monkeypatch.setattr(settings, 'interview_main_question_count', 2)
+    _patch_llm(monkeypatch, main_questions=['자기소개 부탁드립니다', '지원 동기는?'])
+
+    with client.websocket_connect(_ws_url()) as ws:
+        m0 = ws.receive_json()
+        assert m0['questionId'] == 'm0'
+        assert m0['isLast'] is False  # 마지막 메인 아님
+        # m0 은 마지막이 아니므로 꼬리질문이 붙는다.
+        ws.send_bytes(b'a1')
+        ws.send_json({'type': 'control', 'action': 'answer_end'})
+        _drain(ws, 3)  # transcript + eval 2
+        ws.send_json({'type': 'control', 'action': 'next'})
+        follow = ws.receive_json()
+        assert follow['questionId'] == 'f0'
+        assert follow['kind'] == 'follow_up'
+        assert follow['isLast'] is False  # 꼬리질문은 항상 마지막 아님
+        # 꼬리 답변 → 마지막 메인 m1(isLast=True)
+        ws.send_bytes(b'a2')
+        ws.send_json({'type': 'control', 'action': 'answer_end'})
+        _drain(ws, 3)
+        ws.send_json({'type': 'control', 'action': 'next'})
+        m1 = ws.receive_json()
+        assert m1['questionId'] == 'm1'
+        assert m1['isLast'] is True  # 마지막 메인
+        # 마지막 메인 답변 → next 시 꼬리질문 없이 곧장 요약(꼬리 억제 확인).
+        ws.send_bytes(b'a3')
+        ws.send_json({'type': 'control', 'action': 'answer_end'})
+        _drain(ws, 3)
+        ws.send_json({'type': 'control', 'action': 'next'})
+        nxt = ws.receive_json()
+
+    assert nxt['type'] == 'summary'  # f0 이 아니라 곧장 요약
+
+
 def test_ws_summary_after_main_questions_exhausted(monkeypatch):
-    # 메인 1개로 줄여 빠르게 소진 → 꼬리 1번 후 요약.
+    # 메인 1개로 줄여 빠르게 소진 → 마지막 메인이라 꼬리질문 없이 곧장 요약.
     # count 도 1 로 맞춰 부족분 보충(_ensure_question_count)이 끼어들지 않게 한다.
     monkeypatch.setattr(settings, 'interview_main_question_count', 1)
     _patch_llm(monkeypatch, main_questions=['자기소개 부탁드립니다'])
 
     with client.websocket_connect(_ws_url()) as ws:
-        assert ws.receive_json()['questionId'] == 'm0'
+        first = ws.receive_json()
+        assert first['questionId'] == 'm0'
+        assert first['isLast'] is True  # 질문 1개 → m0 가 곧 마지막
         ws.send_bytes(b'a1')
         ws.send_json({'type': 'control', 'action': 'answer_end'})
         _drain(ws, 3)
-        ws.send_json({'type': 'control', 'action': 'next'})  # 꼬리질문
-        assert ws.receive_json()['questionId'] == 'f0'
-        ws.send_bytes(b'a2')
-        ws.send_json({'type': 'control', 'action': 'answer_end'})
-        _drain(ws, 3)
-        ws.send_json({'type': 'control', 'action': 'next'})  # 메인 소진 → 요약
+        ws.send_json({'type': 'control', 'action': 'next'})  # 마지막 메인 → 곧장 요약
         summary = ws.receive_json()
 
     assert summary['type'] == 'summary'
@@ -387,12 +435,7 @@ def test_ws_ignores_control_after_summary(monkeypatch):
         ws.send_bytes(b'a1')
         ws.send_json({'type': 'control', 'action': 'answer_end'})
         _drain(ws, 3)
-        ws.send_json({'type': 'control', 'action': 'next'})  # 꼬리질문
-        assert ws.receive_json()['questionId'] == 'f0'
-        ws.send_bytes(b'a2')
-        ws.send_json({'type': 'control', 'action': 'answer_end'})
-        _drain(ws, 3)
-        ws.send_json({'type': 'control', 'action': 'next'})  # 메인 소진 → 요약
+        ws.send_json({'type': 'control', 'action': 'next'})  # 마지막 메인 → 곧장 요약
         assert ws.receive_json()['type'] == 'summary'
 
         # 요약 후 추가 전이 — 모두 무시되어야 한다(추가 다운스트림·요약 재실행 없음).
@@ -440,12 +483,7 @@ def test_ws_accumulated_landmarks_reflected_in_summary(monkeypatch):
         ws.send_bytes(b'audio')
         ws.send_json({'type': 'control', 'action': 'answer_end'})
         _drain(ws, 2)  # transcript + eval
-        ws.send_json({'type': 'control', 'action': 'next'})  # 꼬리질문
-        assert ws.receive_json()['questionId'] == 'f0'
-        ws.send_bytes(b'a2')
-        ws.send_json({'type': 'control', 'action': 'answer_end'})
-        _drain(ws, 2)
-        ws.send_json({'type': 'control', 'action': 'next'})  # 메인 소진 → 요약
+        ws.send_json({'type': 'control', 'action': 'next'})  # 마지막 메인 → 곧장 요약
         summary = ws.receive_json()
 
     assert summary['type'] == 'summary'
@@ -470,12 +508,7 @@ def test_ws_summary_sent_even_if_nonverbal_aggregate_raises(monkeypatch):
         ws.send_bytes(b'a1')
         ws.send_json({'type': 'control', 'action': 'answer_end'})
         _drain(ws, 2)  # transcript + eval
-        ws.send_json({'type': 'control', 'action': 'next'})  # 꼬리질문
-        assert ws.receive_json()['questionId'] == 'f0'
-        ws.send_bytes(b'a2')
-        ws.send_json({'type': 'control', 'action': 'answer_end'})
-        _drain(ws, 2)
-        ws.send_json({'type': 'control', 'action': 'next'})  # 메인 소진 → 요약
+        ws.send_json({'type': 'control', 'action': 'next'})  # 마지막 메인 → 곧장 요약
         summary = ws.receive_json()
 
     assert summary['type'] == 'summary'
