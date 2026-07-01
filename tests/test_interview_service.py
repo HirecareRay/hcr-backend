@@ -10,6 +10,7 @@ from collections.abc import AsyncIterator
 from unittest.mock import AsyncMock, Mock
 
 from app.interview import context, llm, nonverbal, service, stt
+from app.interview.personas import CULTURE, PRACTICAL, TECH
 from app.interview.schemas import EventSnapshotMessage, LandmarkFrameMessage
 
 
@@ -37,13 +38,17 @@ def test_build_main_questions_empty_context_skips_llm(monkeypatch):
     assert result.questions == list(context.FALLBACK_MAIN_QUESTIONS)
     # 순수 폴백 — 라우터가 이 값으로 꼬리질문까지 생략한다.
     assert result.personalized is False
+    # 폴백 면접에도 3인 패널을 배정한다(결정 1) — 기본질문에도 면접관 배지·목소리.
+    assert [p.id for p in result.personas] == [
+        'culture_fit', 'tech_pressure', 'practical', 'culture_fit'
+    ]
 
 
 def test_build_main_questions_job_title_only_invokes_llm(monkeypatch):
     """직무만 주어져도 그 직무를 LLM 에 넘겨 개인화 질문을 만든다."""
     captured: dict = {}
 
-    async def _fake_generate(company_context, user_context, job_title, count):
+    async def _fake_generate(company_context, user_context, job_title, personas):
         captured['job_title'] = job_title
         return ['데이터 파이프라인 경험은?', '자기소개?']
 
@@ -68,10 +73,11 @@ def test_build_main_questions_passes_company_and_user_context_to_llm(monkeypatch
         captured['user_id'] = user_id
         return '[이력서]\n보유 기술: Python'
 
-    async def _fake_generate(company_context, user_context, job_title, count):
+    async def _fake_generate(company_context, user_context, job_title, personas):
         captured['company_context'] = company_context
         captured['user_context'] = user_context
         captured['job_title'] = job_title
+        captured['personas'] = personas
         return ['자기소개?', '파이썬 경험은?']
 
     monkeypatch.setattr(context, 'get_company_context', _fake_company)
@@ -95,6 +101,9 @@ def test_build_main_questions_passes_company_and_user_context_to_llm(monkeypatch
     assert captured['company_context'] == '회사명: CJ ENM'
     assert captured['user_context'] == '[이력서]\n보유 기술: Python'
     assert captured['job_title'] == '백엔드 개발자'
+    # count=2 슬롯에 3인 패널이 배정돼 LLM 에 전달되고, 결과에도 병렬로 담긴다.
+    assert [p.id for p in captured['personas']] == ['culture_fit', 'tech_pressure']
+    assert [p.id for p in result.personas] == ['culture_fit', 'tech_pressure']
 
 
 def test_build_main_questions_falls_back_on_error(monkeypatch):
@@ -183,12 +192,26 @@ def test_stream_evaluation_swallows_llm_error(monkeypatch):
 # ── generate_follow_up ────────────────────────────────────────────
 
 
+# 꼬리질문 결정론 가드(_MIN_FOLLOW_UP_WORDS)를 통과할 만큼 실질 있는 답변.
+_SUBSTANTIVE_ANSWER = '저는 대용량 트래픽을 처리한 경험이 있습니다'
+
+
 def test_follow_up_empty_answer_returns_none(monkeypatch):
-    """답변이 없으면 꼬리질문을 만들지 않는다."""
+    """답변이 없으면 LLM 없이 꼬리질문을 만들지 않는다(결정론 가드)."""
     monkeypatch.setattr(
         llm, 'generate_follow_up', AsyncMock(side_effect=AssertionError('호출 금지'))
     )
-    assert asyncio.run(service.generate_follow_up('q', '')) is None
+    assert asyncio.run(service.generate_follow_up('q', '', CULTURE)) is None
+
+
+def test_follow_up_thin_answer_skips_without_llm(monkeypatch):
+    """인사말·이름만("안녕하세요 박초롱입니다")이면 LLM 도 안 부르고 곧장 None."""
+    guard = AsyncMock(side_effect=AssertionError('얕은 답변엔 LLM 호출 금지'))
+    monkeypatch.setattr(llm, 'generate_follow_up', guard)
+    assert asyncio.run(
+        service.generate_follow_up('자기소개', '안녕하세요 박초롱입니다', CULTURE)
+    ) is None
+    guard.assert_not_awaited()
 
 
 def test_follow_up_error_returns_none(monkeypatch):
@@ -196,24 +219,30 @@ def test_follow_up_error_returns_none(monkeypatch):
     monkeypatch.setattr(
         llm, 'generate_follow_up', AsyncMock(side_effect=RuntimeError('down'))
     )
-    assert asyncio.run(service.generate_follow_up('q', 'a')) is None
+    assert asyncio.run(
+        service.generate_follow_up('q', _SUBSTANTIVE_ANSWER, TECH)
+    ) is None
 
 
 def test_follow_up_returns_trimmed_text(monkeypatch):
-    """정상 생성 시 다듬은 본문을 반환."""
+    """정상 생성 시(실질 있는 답변) 다듬은 본문을 반환."""
     monkeypatch.setattr(
         llm, 'generate_follow_up', AsyncMock(return_value='  더 구체적으로?  ')
     )
-    assert asyncio.run(service.generate_follow_up('q', 'a')) == '더 구체적으로?'
+    assert asyncio.run(
+        service.generate_follow_up('q', _SUBSTANTIVE_ANSWER, PRACTICAL)
+    ) == '더 구체적으로?'
 
 
 def test_follow_up_skip_sentinel_returns_none(monkeypatch):
-    """부실한 답에 LLM 이 SKIP 을 주면 억지 꼬리질문 대신 None(이름 붙들기 방지)."""
+    """가드를 통과한 답변이라도 LLM 이 SKIP 을 주면 None(억지 꼬리질문 방지)."""
     for sentinel in ('SKIP', ' skip ', '"SKIP".', 'Skip'):
         monkeypatch.setattr(
             llm, 'generate_follow_up', AsyncMock(return_value=sentinel)
         )
-        assert asyncio.run(service.generate_follow_up('자기소개', '홍길동입니다')) is None
+        assert asyncio.run(
+            service.generate_follow_up('자기소개', _SUBSTANTIVE_ANSWER, CULTURE)
+        ) is None
 
 
 # ── transcribe_answer (회귀 가드) ─────────────────────────────────
