@@ -1,4 +1,5 @@
 import logging
+from datetime import datetime
 from pymongo.database import Database
 
 logger = logging.getLogger(__name__)
@@ -28,9 +29,14 @@ def save_document_field(db: Database, user_id: str, field_name: str, field_data:
     collection = verify_and_get_collection(db)
     
     # ponytail: 4가지 종류의 문서를 최상위 키값에 넣어 개별 수정/조회 가능하도록 $set으로 업데이트합니다.
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    # 저장/수정 시간 반영 — created_datetime은 프런트의 "최종 수정" 표시에 사용
+    if isinstance(field_data, dict):
+        field_data = {**field_data, "created_datetime": now}
+
     result = collection.update_one(
         {"user_id": user_id},
-        {"$set": {field_name: field_data}},
+        {"$set": {field_name: field_data, "docs_updated_at": now}},
         upsert=True
     )
     if result.matched_count > 0:
@@ -53,6 +59,9 @@ def delete_document_field(db: Database, user_id: str, field_name: str) -> bool:
     collection = verify_and_get_collection(db)
     result = collection.update_one(
         {"user_id": user_id},
-        {"$unset": {field_name: ""}}
+        {
+            "$unset": {field_name: ""},
+            "$set":   {"docs_updated_at": datetime.now().strftime('%Y-%m-%d %H:%M:%S')},
+        }
     )
     return result.matched_count > 0
