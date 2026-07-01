@@ -31,6 +31,20 @@ _SCORE_MAX = 100.0
 
 
 @dataclass(frozen=True)
+class MainQuestionSet:
+    """생성된 메인 질문과 개인화 여부.
+
+    personalized 는 회사·지원자문서·직무 중 하나라도 컨텍스트가 있어 LLM 개인화
+    질문을 만들었는지다. 셋 다 없어 기본질문으로만 채운 '순수 폴백' 면접이면 False —
+    이 경우 라우터가 꼬리질문도 붙이지 않아 완전 결정론적·OpenAI 호출 0 기본 면접이
+    된다(빌린 키 비용 최소화). 하나라도 있으면 True(꼬리질문 진행).
+    """
+
+    questions: list[str]
+    personalized: bool
+
+
+@dataclass(frozen=True)
 class Turn:
     """한 번의 질문-답변-평가 기록. 꼬리질문·요약·결과 스크립트의 입력이 된다.
 
@@ -55,7 +69,7 @@ async def build_main_questions(
     job_title: str | None = None,
     db: object | None = None,
     mongo: object | None = None,
-) -> list[str]:
+) -> MainQuestionSet:
     """회사·지원자·직무 컨텍스트로 메인 질문을 생성한다(있는 데이터만큼만 개인화).
 
     company_id·db·mongo 가 주어지면 실제 회사 분석을, user_id·mongo 가 주어지면
@@ -63,6 +77,9 @@ async def build_main_questions(
     만든다. 셋 다 비면(회사·지원자·직무 모두 없음) LLM 을 호출하지 않고 곧장 기본
     질문으로 폴백한다 — 불필요한 OpenAI 비용·지연을 막는다. 하나라도 있으면 있는
     것만으로 개인화하고, 개수가 부족하면 기본 질문으로 보충한다.
+
+    반환값의 personalized 로 순수 폴백(컨텍스트 전무) 여부를 알려, 라우터가 그 경우
+    꼬리질문까지 생략하도록 한다(완전 결정론적 기본 면접, OpenAI 호출 0).
     """
     company_context = await context.get_company_context(
         db=db, mongo=mongo, company_id=company_id
@@ -74,7 +91,7 @@ async def build_main_questions(
 
     # 빈 컨텍스트 단축 경로 — 회사·지원자·직무가 모두 없으면 LLM 없이 기본 질문.
     if not company_context and not user_context and not job:
-        return _ensure_question_count([], count)
+        return MainQuestionSet(_ensure_question_count([], count), personalized=False)
 
     try:
         questions = await llm.generate_main_questions(
@@ -83,7 +100,7 @@ async def build_main_questions(
     except RuntimeError as error:
         logger.error('메인 질문 생성 실패, 기본 질문 사용: %s', error)
         questions = []
-    return _ensure_question_count(questions, count)
+    return MainQuestionSet(_ensure_question_count(questions, count), personalized=True)
 
 
 def _ensure_question_count(questions: list[str], count: int) -> list[str]:
@@ -226,9 +243,11 @@ async def stream_evaluation(
 
 
 async def generate_follow_up(question: str, answer: str) -> str | None:
-    """직전 답변 기반 꼬리질문 본문을 만든다(빈 답변·생성 실패면 None).
+    """직전 답변 기반 꼬리질문 본문을 만든다(빈 답변·부실한 답·생성 실패면 None).
 
-    None 이면 라우터가 꼬리질문을 건너뛰고 다음 메인 질문으로 넘어간다.
+    None 이면 라우터가 꼬리질문을 건너뛰고 다음 메인 질문으로 넘어간다. 답변이
+    이름·소속만 말하거나 너무 짧아 파고들 내용이 없으면 LLM 이 SKIP 을 반환하는데,
+    이를 감지해 None 으로 바꿔 억지 꼬리질문(예: 이름을 붙들고 늘어지는 질문)을 막는다.
     """
     if not answer:
         return None
@@ -237,7 +256,18 @@ async def generate_follow_up(question: str, answer: str) -> str | None:
     except RuntimeError as error:
         logger.error('꼬리질문 생성 실패: %s', error)
         return None
-    return text.strip() or None
+    follow_up = text.strip()
+    return None if _is_skip_sentinel(follow_up) else follow_up or None
+
+
+def _is_skip_sentinel(text: str) -> bool:
+    """LLM 이 '파고들 내용 없음'으로 돌려준 SKIP 신호인지 판별한다.
+
+    모델이 SKIP 을 따옴표·마침표와 함께 낼 수 있어(예: '"SKIP".') 앞뒤 기호를
+    벗기고 대소문자 무시로 비교한다. 정상 질문이 우연히 SKIP 으로 시작하는 일은 없다.
+    """
+    normalized = text.strip().strip('\'"`.!? ').upper()
+    return normalized == 'SKIP'
 
 
 async def build_summary(
@@ -257,10 +287,32 @@ async def build_summary(
     return _summary_event(data, metrics or NonverbalMetrics())
 
 
+def is_answered(turn: Turn) -> bool:
+    """그 턴에 실질 답변이 있는지 — 빈 답변·공백만이면 '무응답'으로 본다.
+
+    답변을 건너뛴(control:next 로 넘긴) 턴은 answer='' 로 기록되므로, 강점·평가를
+    이 무응답 턴에서 지어내지 않도록 판별 기준을 한 곳에 둔다.
+    """
+    return bool(turn.answer.strip())
+
+
+def has_any_answer(history: tuple[Turn, ...]) -> bool:
+    """면접 기록에 실질 답변이 하나라도 있는지(전부 무응답이면 False).
+
+    전부 무응답이면 리포트 LLM 을 호출하지 않고 빈 결과로 우회한다 — 없는 강점·
+    점수를 지어내지 않고, 빌린 OpenAI 키도 낭비하지 않는다.
+    """
+    return any(is_answered(turn) for turn in history)
+
+
 def format_history(history: tuple[Turn, ...]) -> str:
-    """누적 턴을 LLM 요약·리포트 입력용 텍스트로 직렬화한다(요약·결과 공용 공개 헬퍼)."""
+    """누적 턴을 LLM 요약·리포트 입력용 텍스트로 직렬화한다(요약·결과 공용 공개 헬퍼).
+
+    무응답 턴은 답변을 '(무응답)'으로 명시해, LLM 이 빈 답변을 그럴듯한 답으로
+    오해해 강점·점수를 지어내지 않게 한다(정직한 입력 — 근거 없는 평가 차단).
+    """
     blocks = [
-        f'Q{i}: {turn.question}\nA{i}: {turn.answer}\n평가{i}: {turn.evaluation}'
+        f'Q{i}: {turn.question}\nA{i}: {turn.answer.strip() or "(무응답)"}\n평가{i}: {turn.evaluation}'
         for i, turn in enumerate(history, start=1)
     ]
     return '\n\n'.join(blocks)
