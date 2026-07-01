@@ -29,7 +29,7 @@ from app.auth.security import decode_access_token
 from app.core.config import settings
 from app.db.mongo import get_mongo_db
 from app.interview import result_service, service, ws_origin, ws_ticket
-from app.interview.result_schemas import InterviewResult
+from app.interview.result_schemas import InterviewHistoryList, InterviewResult
 from app.interview.schemas import (
     ControlAction,
     ControlMessage,
@@ -203,6 +203,49 @@ async def get_result_by_company(
     """그 유저의 해당 회사 최신 면접 결과를 조회한다(로그인 전용)."""
     user_id = _require_user(credentials)
     result = result_service.get_result_by_company(mongo, user_id, company_id)
+    if result is None:
+        raise _result_not_found
+    return result
+
+
+# 마이페이지 "AI 면접 기록" — 세션 단위 목록/상세. 'history' 를 먼저 선언한다:
+# '/sessions/{result_id}' 가 '/sessions/history' 를 result_id='history' 로 잘못 삼키지
+# 않도록(FastAPI 는 선언 순서대로 매칭한다 — /results/by-id 와 동일 이유).
+@router.get(
+    '/sessions/history',
+    response_model=InterviewHistoryList,
+    response_model_by_alias=True,
+)
+async def list_session_history(
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
+    mongo: Database = Depends(get_mongo_db),
+) -> InterviewHistoryList:
+    """그 유저의 면접 세션 기록을 최신순 카드 목록으로 조회한다(로그인 전용).
+
+    limit·cursor 는 향후 페이지네이션 대비 예약 — 현재는 전체 최신순을 반환한다.
+    기록이 없으면 빈 목록({items:[], total:0}) — 정상이므로 404 로 막지 않는다.
+    """
+    user_id = _require_user(credentials)
+    return result_service.list_session_history(mongo, user_id)
+
+
+@router.get(
+    '/sessions/{result_id}',
+    response_model=InterviewResult,
+    response_model_by_alias=True,
+)
+async def get_session_result(
+    result_id: str,
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
+    mongo: Database = Depends(get_mongo_db),
+) -> InterviewResult:
+    """result_id(세션 식별자)로 그 세션의 전체 리포트를 조회한다(로그인·소유자 전용).
+
+    목록 카드 클릭 시 특정 과거 세션을 집는 경로다(계약 ②). 존재하지 않거나 남의
+    세션이면 404(get_result_by_id 가 소유자 아니면 None 을 준다 — 남의 결과 차단).
+    """
+    user_id = _require_user(credentials)
+    result = result_service.get_result_by_id(mongo, user_id, result_id)
     if result is None:
         raise _result_not_found
     return result
