@@ -62,6 +62,10 @@ _ticket_auth_error = HTTPException(
 _MAX_LANDMARKS = 1200  # ~20분 @ 1s
 _MAX_EVENTS = 500
 _MAX_VOICE = 1200  # ~20분 @ 1s (landmark 와 동일 주기)
+# 메인 질문 수 허용범위 — config Field(ge=1, le=10)과 맞춘다. 프론트가 시간→개수로
+# 환산해 questionCount 로 보내며, 범위 밖·비정상 값은 기본값으로 우회한다.
+_MIN_QUESTION_COUNT = 1
+_MAX_QUESTION_COUNT = 10
 # 타이핑 답변(text_answer) 한 건의 최대 길이. 면접 답변은 길어야 수천 자라 넉넉하다.
 # 답변은 평가 1회 + 요약(매 턴 누적)으로 LLM 에 들어가므로, 거대한 붙여넣기로
 # 빌린 OpenAI 키 토큰을 증폭시키지 못하게 자른다(버리지 않고 앞부분만 — 면접 안 끊김).
@@ -231,6 +235,27 @@ def _read_context_params(websocket: WebSocket) -> tuple[str | None, str | None]:
     return company_id, job_title
 
 
+def _read_question_count(websocket: WebSocket) -> int:
+    """접속 쿼리의 questionCount(메인 질문 수)를 읽어 허용범위로 clamp 한다.
+
+    프론트의 면접 시간 선택(예: 10/15/20분)을 메인 주제 개수로 환산해 넘기는 값이다 —
+    시간을 서버가 강제로 재서 끊지 않고, "메인 몇 개"로 면접 골격을 정한다(꼬리질문은
+    답변에 따라 그 위에 얹힌다). 없거나 숫자가 아니거나 범위를 벗어나면 기본값
+    (INTERVIEW_MAIN_QUESTION_COUNT)으로 우회한다 — 잘못된 쿼리가 면접을 막지 않는다.
+    """
+    raw = websocket.query_params.get('questionCount') or websocket.query_params.get(
+        'question_count'
+    )
+    default = settings.interview_main_question_count
+    if raw is None:
+        return default
+    try:
+        count = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return max(_MIN_QUESTION_COUNT, min(count, _MAX_QUESTION_COUNT))
+
+
 async def _build_questions(
     websocket: WebSocket, user_id: str, company_id: str | None, job_title: str | None
 ) -> service.MainQuestionSet:
@@ -238,6 +263,7 @@ async def _build_questions(
 
     user_id 는 핸들러가 입장 티켓을 소비해 확정한 값이다. companyId·jobTitle 은 선택 —
     companyId 가 없으면 회사 컨텍스트 주입만, jobTitle 이 없으면 직무 주입만 생략한다.
+    메인 질문 개수는 접속 쿼리 questionCount(시간 선택 환산값)로 정하고, 없으면 기본값.
 
     MariaDB 세션은 질문 생성 동안만 열고 곧장 닫는다 — 면접 루프는 DB 가 필요 없어
     긴 세션 내내 풀 커넥션을 점유하지 않게 한다. MongoDB 핸들은 앱 수명이 관리한다.
@@ -246,7 +272,7 @@ async def _build_questions(
     db = _open_db_session(websocket)
     try:
         return await service.build_main_questions(
-            settings.interview_main_question_count,
+            _read_question_count(websocket),
             company_id=company_id,
             user_id=user_id,
             job_title=job_title,
