@@ -136,6 +136,7 @@ def _related_job(j: dict) -> dict:
         deadline = f"{str(deadline_raw).replace('-', '.')} 마감"
     return {
         "id": str(j["_id"]),
+        "companyId": str(j.get("company_id")),
         "companyName": _s(j.get("company_name")),
         "title": _s(j.get("posting_title")),
         "url": _s(j.get("source_url")),

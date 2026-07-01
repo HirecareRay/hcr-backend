@@ -28,7 +28,7 @@ from app.db.session import Base, build_engine, build_session_factory
 from app.analysis.router import router as analysis_router
 from app.documents.router import router as documents_router
 from app.interview.router import router as interview_router
-from app.jobs.router import router as jobs_router
+from app.jobs.router import jobs_search_router, router as jobs_router
 from app.news.router import router as news_router
 from app.ranking import models as _ranking_models  # noqa: F401  (create_all 용 테이블 등록)
 from app.ranking.router import router as ranking_router
@@ -94,6 +94,7 @@ app.include_router(company_router)
 app.include_router(documents_router)
 app.include_router(interview_router)
 app.include_router(jobs_router)
+app.include_router(jobs_search_router)
 app.include_router(news_router)
 app.include_router(ranking_router)
 app.include_router(search_router)
