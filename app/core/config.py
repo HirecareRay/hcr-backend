@@ -77,6 +77,13 @@ class Settings(BaseSettings):
     # ⚠️ 운영에선 반드시 .env 로 도메인을 채운다 — 비우면 개발 모드(로컬 프론트만 허용)다.
     interview_allowed_origins: str = ""
 
+    # ── 인기기업 순위(랭킹/trending) ──────────────────────────────────────
+    # 리포트 조회수를 회사·날짜별로 누적해 최근 N 일 합산으로 순위를 낸다.
+    # 윈도우(일): '오늘만'(=1)이면 자정에 비고 새벽엔 표본이 적어 순위가 출렁이므로
+    # 기본 7일 롤링으로 안정화한다(1~30). 노출 개수는 기본 5개(1~20).
+    ranking_trending_window_days: int = Field(7, ge=1, le=30)
+    ranking_trending_default_limit: int = Field(5, ge=1, le=20)
+
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
 settings = Settings()
