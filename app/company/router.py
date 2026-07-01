@@ -3,13 +3,14 @@
 DB 는 develop 패턴대로 Depends(get_db)·Depends(get_mongo_db)로 주입받는다.
 """
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from pymongo.database import Database
 from sqlalchemy.orm import Session
 
 from app.company import service
 from app.db.mongo import get_mongo_db
 from app.db.session import get_db
+from app.ranking import service as ranking_service
 
 router = APIRouter(prefix="/companies", tags=["company"])
 
@@ -44,11 +45,22 @@ def get_company(company_id: str, mongo: Database = Depends(get_mongo_db)):
 @router.get("/{company_id}/report")
 def get_company_report(
     company_id: str,
+    request: Request,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     mongo: Database = Depends(get_mongo_db),
 ):
-    """회사 분석 보고서 — DB 테이블들을 합쳐 프론트 스키마(8섹션)로 반환."""
+    """회사 분석 보고서 — DB 테이블들을 합쳐 프론트 스키마(8섹션)로 반환.
+
+    조회 성공 시 인기기업 순위 집계용으로 조회수를 +1 한다 — 응답을 막지 않도록
+    BackgroundTasks 로 응답 후에 처리한다. record_view 는 새 세션을 직접 열고
+    실패도 삼키므로, 집계가 어긋나도 리포트 응답엔 영향이 없다.
+    """
     try:
-        return service.build_company_report(db, mongo, company_id)
+        report = service.build_company_report(db, mongo, company_id)
     except service.CompanyNotFound:
         raise HTTPException(status_code=404, detail="회사 없음")
+    background_tasks.add_task(
+        ranking_service.record_view, request.app.state.session_factory, company_id
+    )
+    return report
