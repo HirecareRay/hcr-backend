@@ -76,3 +76,17 @@ def find_latest_by_user(db: Database, user_id: str) -> dict | None:
 def count_by_user(db: Database, user_id: str) -> int:
     """그 유저의 누적 세션 수(누적 연습 횟수 계산용)."""
     return _get_collection(db).count_documents({'user_id': user_id})
+
+
+def find_all_by_user(db: Database, user_id: str) -> list[dict]:
+    """그 유저의 모든 세션을 최신순으로 조회한다(마이페이지 면접 기록 목록용).
+
+    (user_id, created_at) 복합 인덱스를 그대로 타 최신순 정렬한다 — created_at 은
+    저장 시각이라 conducted_at(면접 진행 시각) 최신순과 사실상 동일 순서다(둘 다 세션
+    진행에 따라 함께 증가). 기록이 없으면 빈 리스트(빈 목록은 정상 — 404 아님).
+    """
+    cursor = _get_collection(db).find(
+        {'user_id': user_id},
+        sort=[('created_at', DESCENDING)],
+    )
+    return list(cursor)
