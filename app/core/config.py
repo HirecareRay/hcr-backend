@@ -77,6 +77,21 @@ class Settings(BaseSettings):
     # ⚠️ 운영에선 반드시 .env 로 도메인을 채운다 — 비우면 개발 모드(로컬 프론트만 허용)다.
     interview_allowed_origins: str = ""
 
+    # ── 인기기업 순위(랭킹/trending) ──────────────────────────────────────
+    # 리포트 조회수를 회사·날짜별로 누적해 최근 N 일 합산으로 순위를 낸다.
+    # 윈도우(일): '오늘만'(=1)이면 자정에 비고 새벽엔 표본이 적어 순위가 출렁이므로
+    # 기본 7일 롤링으로 안정화한다(1~30). 노출 개수는 기본 5개(1~20).
+    ranking_trending_window_days: int = Field(7, ge=1, le=30)
+    ranking_trending_default_limit: int = Field(5, ge=1, le=20)
+    # 로고 베이스 — website_url 도메인으로 Google favicon URL(f"{base}?domain={d}&sz={n}")을 만든다.
+    # Clearbit(구 기본값)는 2024 HubSpot 인수 후 무료 로고 API 가 폐지돼 DNS 자체가 죽어 교체.
+    # Google s2/favicons 는 favicon 기반이라 브랜드 로고 DB 와 달리 중소기업 커버리지가 높고,
+    # 없으면 404 라 프론트 onError 폴백(이니셜 원)이 깔끔하다.
+    # 빈 값이면 자동 로고 산출을 끈다(큐레이션 logo_url 만 사용 — 외부 의존 차단 스위치).
+    ranking_logo_cdn_base: str = "https://www.google.com/s2/favicons"
+    # favicon 요청 크기(px) — 프론트 로고 원에 맞춰 업스케일한다(16~256).
+    ranking_logo_size: int = Field(128, ge=16, le=256)
+
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
 settings = Settings()
