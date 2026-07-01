@@ -87,6 +87,9 @@ class _WsSession:
     main_questions: tuple[str, ...] = ()
     main_index: int = 0
     awaiting_followup: bool = False
+    # 회사·지원자문서·직무 중 하나라도 있어 개인화 질문을 만들었는지. False(순수 폴백,
+    # 컨텍스트 전무)면 꼬리질문을 붙이지 않아 완전 결정론적·OpenAI 호출 0 기본 면접이 된다.
+    personalized: bool = False
     current_question: str = ''
     # 요약(면접 종료)이 끝났는지. 요약 후 들어오는 control(next·answer_end)은 무시해
     # 평가·요약·리포트(LLM)와 결과 저장이 재실행되지 못하게 막는다 — 한 티켓으로
@@ -230,8 +233,8 @@ def _read_context_params(websocket: WebSocket) -> tuple[str | None, str | None]:
 
 async def _build_questions(
     websocket: WebSocket, user_id: str, company_id: str | None, job_title: str | None
-) -> list[str]:
-    """user_id·접속 쿼리·DB 로 개인화 메인 질문을 생성한다.
+) -> service.MainQuestionSet:
+    """user_id·접속 쿼리·DB 로 개인화 메인 질문을 생성한다(질문 + 개인화 여부).
 
     user_id 는 핸들러가 입장 티켓을 소비해 확정한 값이다. companyId·jobTitle 은 선택 —
     companyId 가 없으면 회사 컨텍스트 주입만, jobTitle 이 없으면 직무 주입만 생략한다.
@@ -288,10 +291,12 @@ async def interview_ws(websocket: WebSocket, session_id: str) -> None:
     await websocket.accept()
     started_at = datetime.now(timezone.utc)
     company_id, job_title = _read_context_params(websocket)
-    questions = await _build_questions(websocket, user_id, company_id, job_title)
+    question_set = await _build_questions(websocket, user_id, company_id, job_title)
+    questions = question_set.questions
     first = questions[0]
     session = _WsSession(
         main_questions=tuple(questions),
+        personalized=question_set.personalized,
         current_question=first,
         user_id=user_id,
         company_id=company_id,
@@ -501,12 +506,14 @@ async def _transcribe(websocket: WebSocket, session: _WsSession) -> str:
 async def _advance(websocket: WebSocket, session: _WsSession) -> _WsSession:
     """다음 전이 — 메인 답변 직후엔 꼬리질문, 꼬리 답변 직후엔 다음 메인/요약.
 
-    단, 현재가 마지막 메인이면 꼬리질문을 붙이지 않는다 — 그래야 질문 전송 시점에
-    "이게 진짜 마지막(is_last)"임을 결정적으로 확정할 수 있고, 마지막 답변의 next 가
-    곧장 요약으로 이어진다(프론트 "결과 보기" 흐름과 일치).
+    꼬리질문은 (1) 개인화 면접이고(personalized — 회사·문서·직무 컨텍스트가 있음),
+    (2) 지금이 마지막 메인이 아닐 때만 시도한다. 순수 폴백(컨텍스트 전무) 면접은
+    기본질문만으로 결정론적으로 진행해 꼬리질문 LLM 호출을 아예 하지 않는다.
+    마지막 메인에 꼬리를 안 붙이는 건 질문 전송 시점에 "진짜 마지막(is_last)"을
+    결정적으로 확정하고, 그 답변의 next 가 곧장 요약으로 이어지게 하기 위함이다.
     """
     is_last_main = session.main_index >= len(session.main_questions) - 1
-    if not session.awaiting_followup and not is_last_main:
+    if session.personalized and not session.awaiting_followup and not is_last_main:
         followed = await _try_follow_up(websocket, session)
         if followed is not None:
             return followed

@@ -17,23 +17,26 @@ from app.interview.schemas import EventSnapshotMessage, LandmarkFrameMessage
 
 
 def test_build_main_questions_uses_llm_result(monkeypatch):
-    """컨텍스트가 하나라도 있으면(여기선 직무) LLM 질문을 그대로 사용한다."""
+    """컨텍스트가 하나라도 있으면(여기선 직무) LLM 질문을 그대로 쓰고 personalized=True."""
     monkeypatch.setattr(
         llm, 'generate_main_questions', AsyncMock(return_value=['자기소개?', '동기?'])
     )
-    questions = asyncio.run(service.build_main_questions(2, job_title='백엔드 개발자'))
-    assert questions == ['자기소개?', '동기?']
+    result = asyncio.run(service.build_main_questions(2, job_title='백엔드 개발자'))
+    assert result.questions == ['자기소개?', '동기?']
+    assert result.personalized is True
 
 
 def test_build_main_questions_empty_context_skips_llm(monkeypatch):
-    """회사·지원자·직무가 모두 없으면 LLM 호출 없이 기본 질문으로 폴백한다."""
+    """회사·지원자·직무가 모두 없으면 LLM 없이 기본 질문 폴백 + personalized=False."""
     monkeypatch.setattr(
         llm,
         'generate_main_questions',
         AsyncMock(side_effect=AssertionError('빈 컨텍스트면 LLM 호출 금지')),
     )
-    questions = asyncio.run(service.build_main_questions(4))
-    assert questions == list(context.FALLBACK_MAIN_QUESTIONS)
+    result = asyncio.run(service.build_main_questions(4))
+    assert result.questions == list(context.FALLBACK_MAIN_QUESTIONS)
+    # 순수 폴백 — 라우터가 이 값으로 꼬리질문까지 생략한다.
+    assert result.personalized is False
 
 
 def test_build_main_questions_job_title_only_invokes_llm(monkeypatch):
@@ -45,11 +48,12 @@ def test_build_main_questions_job_title_only_invokes_llm(monkeypatch):
         return ['데이터 파이프라인 경험은?', '자기소개?']
 
     monkeypatch.setattr(llm, 'generate_main_questions', _fake_generate)
-    questions = asyncio.run(
+    result = asyncio.run(
         service.build_main_questions(2, job_title='데이터 엔지니어')
     )
     assert captured['job_title'] == '데이터 엔지니어'
-    assert questions == ['데이터 파이프라인 경험은?', '자기소개?']
+    assert result.questions == ['데이터 파이프라인 경험은?', '자기소개?']
+    assert result.personalized is True
 
 
 def test_build_main_questions_passes_company_and_user_context_to_llm(monkeypatch):
@@ -74,7 +78,7 @@ def test_build_main_questions_passes_company_and_user_context_to_llm(monkeypatch
     monkeypatch.setattr(context, 'get_user_context', _fake_user)
     monkeypatch.setattr(llm, 'generate_main_questions', _fake_generate)
 
-    questions = asyncio.run(
+    result = asyncio.run(
         service.build_main_questions(
             2,
             company_id='c1',
@@ -85,7 +89,7 @@ def test_build_main_questions_passes_company_and_user_context_to_llm(monkeypatch
         )
     )
 
-    assert questions == ['자기소개?', '파이썬 경험은?']
+    assert result.questions == ['자기소개?', '파이썬 경험은?']
     assert captured['company_id'] == 'c1'
     assert captured['user_id'] == 'u1'
     assert captured['company_context'] == '회사명: CJ ENM'
@@ -100,15 +104,18 @@ def test_build_main_questions_falls_back_on_error(monkeypatch):
         'generate_main_questions',
         AsyncMock(side_effect=RuntimeError('LLM down')),
     )
-    questions = asyncio.run(service.build_main_questions(4, job_title='백엔드 개발자'))
-    assert questions == list(context.FALLBACK_MAIN_QUESTIONS)
+    result = asyncio.run(service.build_main_questions(4, job_title='백엔드 개발자'))
+    assert result.questions == list(context.FALLBACK_MAIN_QUESTIONS)
+    # 컨텍스트(직무)는 있었으므로 개인화 면접 — LLM 장애로 질문만 폴백됐다.
+    assert result.personalized is True
 
 
 def test_build_main_questions_falls_back_on_empty(monkeypatch):
-    """LLM 이 빈 목록을 주면 기본 질문으로 우회한다."""
+    """LLM 이 빈 목록을 주면 기본 질문으로 우회한다(컨텍스트는 있어 personalized=True)."""
     monkeypatch.setattr(llm, 'generate_main_questions', AsyncMock(return_value=[]))
-    questions = asyncio.run(service.build_main_questions(4, job_title='백엔드 개발자'))
-    assert questions == list(context.FALLBACK_MAIN_QUESTIONS)
+    result = asyncio.run(service.build_main_questions(4, job_title='백엔드 개발자'))
+    assert result.questions == list(context.FALLBACK_MAIN_QUESTIONS)
+    assert result.personalized is True
 
 
 def test_build_main_questions_pads_short_result_with_fallback(monkeypatch):
@@ -116,7 +123,8 @@ def test_build_main_questions_pads_short_result_with_fallback(monkeypatch):
     monkeypatch.setattr(
         llm, 'generate_main_questions', AsyncMock(return_value=['회사 맞춤 질문?'])
     )
-    questions = asyncio.run(service.build_main_questions(3, job_title='백엔드 개발자'))
+    result = asyncio.run(service.build_main_questions(3, job_title='백엔드 개발자'))
+    questions = result.questions
 
     assert len(questions) == 3
     assert questions[0] == '회사 맞춤 질문?'  # LLM 질문이 앞에 온다
@@ -197,6 +205,15 @@ def test_follow_up_returns_trimmed_text(monkeypatch):
         llm, 'generate_follow_up', AsyncMock(return_value='  더 구체적으로?  ')
     )
     assert asyncio.run(service.generate_follow_up('q', 'a')) == '더 구체적으로?'
+
+
+def test_follow_up_skip_sentinel_returns_none(monkeypatch):
+    """부실한 답에 LLM 이 SKIP 을 주면 억지 꼬리질문 대신 None(이름 붙들기 방지)."""
+    for sentinel in ('SKIP', ' skip ', '"SKIP".', 'Skip'):
+        monkeypatch.setattr(
+            llm, 'generate_follow_up', AsyncMock(return_value=sentinel)
+        )
+        assert asyncio.run(service.generate_follow_up('자기소개', '홍길동입니다')) is None
 
 
 # ── transcribe_answer (회귀 가드) ─────────────────────────────────
