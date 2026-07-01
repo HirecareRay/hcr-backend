@@ -43,6 +43,29 @@ def test_aggregate_all_none_fields_do_not_crash():
     assert metrics.expression_dist == {}
 
 
+def test_all_none_frames_are_not_treated_as_data():
+    """카메라 가림 등으로 전 필드 None 인 빈 프레임만 오면 '데이터 없음'으로 본다.
+
+    프레임 수(frame_count)는 세지만 실제 얼굴 신호(detected_frames)는 0 이라 has_data 는
+    False — 시선이탈 0%·흔들림 0 을 '완벽'으로 오해해 표정 점수를 가짜로 채우지 않는다.
+    """
+    metrics = nonverbal.aggregate(tuple(_frame() for _ in range(30)), ())
+    assert metrics.frame_count == 30
+    assert metrics.detected_frames == 0
+    assert metrics.has_data is False
+    assert nonverbal.to_modal_feedback(metrics) is None  # 빈 모달로 정직하게 비움
+    assert nonverbal.score_penalty(metrics) == 0.0  # 가짜 감점·가점 없음
+
+
+def test_one_detected_frame_counts_as_data():
+    """빈 프레임 사이에 실제 신호 프레임이 하나라도 있으면 데이터로 인정한다."""
+    frames = (_frame(), _frame(gaze_x=0.0, gaze_y=0.0), _frame())
+    metrics = nonverbal.aggregate(frames, ())
+    assert metrics.frame_count == 3
+    assert metrics.detected_frames == 1
+    assert metrics.has_data is True
+
+
 # ── aggregate: 시선이탈률 ─────────────────────────────────────────
 
 
