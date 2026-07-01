@@ -171,7 +171,9 @@ def test_ws_ticket_personalizes_and_is_consumed(monkeypatch):
     ):
         captured['company_id'] = company_id
         captured['user_id'] = user_id
-        return ['자기소개를 부탁드립니다', '강점은?']
+        return service.MainQuestionSet(
+            ['자기소개를 부탁드립니다', '강점은?'], personalized=True
+        )
 
     monkeypatch.setattr(service, 'build_main_questions', _capture)
 
@@ -195,7 +197,9 @@ def test_ws_passes_job_title_query_to_question_builder(monkeypatch):
         count, *, company_id=None, user_id=None, job_title=None, db=None, mongo=None
     ):
         captured['job_title'] = job_title
-        return ['자기소개를 부탁드립니다', '강점은?']
+        return service.MainQuestionSet(
+            ['자기소개를 부탁드립니다', '강점은?'], personalized=True
+        )
 
     monkeypatch.setattr(service, 'build_main_questions', _capture)
 
@@ -337,6 +341,34 @@ def test_ws_next_after_followup_answer_advances_to_next_main(monkeypatch):
         _drain(ws, 3)
         ws.send_json({'type': 'control', 'action': 'next'})
         assert ws.receive_json()['questionId'] == 'm1'
+
+
+def test_ws_fallback_session_skips_follow_up(monkeypatch):
+    """순수 폴백(컨텍스트 전무) 면접은 꼬리질문 없이 곧장 다음 메인으로 넘어간다.
+
+    build_main_questions 가 personalized=False 를 주면, 메인 답변 뒤 next 에서
+    꼬리질문 LLM 을 호출하지 않고(비용 0) m1 로 진행한다.
+    """
+    _patch_llm(monkeypatch)
+
+    async def _fallback(count, **kwargs):
+        return service.MainQuestionSet(
+            ['자기소개 부탁드립니다', '지원 동기는?'], personalized=False
+        )
+
+    monkeypatch.setattr(service, 'build_main_questions', _fallback)
+
+    with client.websocket_connect(_ws_url()) as ws:
+        assert ws.receive_json()['questionId'] == 'm0'
+        ws.send_bytes(b'audio')
+        ws.send_json({'type': 'control', 'action': 'answer_end'})
+        _drain(ws, 3)  # transcript + eval 2
+        ws.send_json({'type': 'control', 'action': 'next'})
+        nxt = ws.receive_json()
+
+    # 꼬리질문(f0) 없이 곧장 다음 메인 — 꼬리질문 LLM 은 호출되지 않는다.
+    assert nxt['questionId'] == 'm1'
+    llm.generate_follow_up.assert_not_awaited()
 
 
 def test_ws_single_question_first_is_last(monkeypatch):
@@ -731,3 +763,53 @@ def test_ws_dummy_mode_resets_token_sequence_each_answer(monkeypatch):
         second_answer_token = ws.receive_json()['delta']
 
     assert first_answer_token == second_answer_token  # 둘 다 첫 토큰부터
+
+
+# ── 메인 질문 개수 (questionCount 쿼리 → build_main_questions count) ─────
+
+
+class _FakeWs:
+    """query_params 만 흉내내는 최소 가짜 WebSocket(_read_question_count 단위 검증용)."""
+
+    def __init__(self, params: dict[str, str]):
+        self.query_params = params
+
+
+def test_read_question_count_defaults_when_absent():
+    """questionCount 가 없으면 설정 기본값을 쓴다."""
+    ws = _FakeWs({})
+    assert router._read_question_count(ws) == settings.interview_main_question_count
+
+
+def test_read_question_count_reads_camel_and_snake():
+    """camelCase·snake_case 둘 다 허용한다."""
+    assert router._read_question_count(_FakeWs({'questionCount': '5'})) == 5
+    assert router._read_question_count(_FakeWs({'question_count': '3'})) == 3
+
+
+def test_read_question_count_clamps_out_of_range():
+    """허용범위(1~10)를 벗어나면 clamp 한다 — 빌린 키 비용·비정상 입력 방어."""
+    assert router._read_question_count(_FakeWs({'questionCount': '99'})) == 10
+    assert router._read_question_count(_FakeWs({'questionCount': '0'})) == 1
+
+
+def test_read_question_count_falls_back_on_non_numeric():
+    """숫자가 아니면 기본값으로 우회한다(잘못된 쿼리가 면접을 막지 않는다)."""
+    ws = _FakeWs({'questionCount': 'abc'})
+    assert router._read_question_count(ws) == settings.interview_main_question_count
+
+
+def test_ws_connect_generates_requested_question_count(monkeypatch):
+    """접속 시 questionCount 가 build_main_questions 의 count 로 전달된다(통합)."""
+    captured: dict[str, int] = {}
+
+    async def _fake_build(count, **kwargs):
+        captured['count'] = count
+        return service.MainQuestionSet(['자기소개 해주세요'], personalized=False)
+
+    monkeypatch.setattr(service, 'build_main_questions', _fake_build)
+
+    with client.websocket_connect(_ws_url(questionCount='3')) as ws:
+        ws.receive_json()  # 첫 질문(m0)
+
+    assert captured['count'] == 3

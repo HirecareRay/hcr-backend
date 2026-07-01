@@ -134,8 +134,13 @@ async def persist_result(
 async def _generate_report(
     history: tuple[service.Turn, ...], job_title: str | None
 ) -> dict:
-    """LLM 종합 리포트 dict 를 생성한다(빈 기록·실패면 빈 dict — 안전 기본값 우회)."""
-    if not history:
+    """LLM 종합 리포트 dict 를 생성한다(빈 기록·전부 무응답·실패면 빈 dict — 안전 기본값 우회).
+
+    실질 답변이 하나도 없으면(전부 스킵) LLM 을 호출하지 않는다 — 없는 강점·점수를
+    지어내지 않고(빈 dict → builder 가 빈 강점·0점으로 정직하게 우회), 빌린 OpenAI
+    키도 낭비하지 않는다.
+    """
+    if not history or not service.has_any_answer(history):
         return {}
     transcript = service.format_history(history)
     try:
@@ -221,12 +226,21 @@ def _build_comparison(
     if not previous or not isinstance(previous.get('result'), dict):
         return None
     prev = previous['result']
-    deltas = [
-        _delta('종합', _score(prev, 'overall'), current.overall.score),
-        _delta('표정', _feedback_score(prev, 'expression'), current.feedback.expression.score),
-        _delta('음성', _feedback_score(prev, 'voice'), current.feedback.voice.score),
-        _delta('답변', _feedback_score(prev, 'answer'), current.feedback.answer.score),
-    ]
+    # 종합·답변은 항상 비교한다(언어 평가는 늘 산출된다). 표정·음성은 카메라·마이크를
+    # 안 켜면 '데이터 없음(빈 모달, score=0)'이라, 0 을 실제 0점으로 오해해 "점수가
+    # 떨어졌다"고 왜곡하지 않도록 양쪽 다 데이터가 있을 때만 비교에 넣는다.
+    deltas = [_delta('종합', _score(prev, 'overall'), current.overall.score)]
+    if current.feedback.expression.metrics and _prev_modal_has_data(prev, 'expression'):
+        deltas.append(
+            _delta('표정', _feedback_score(prev, 'expression'), current.feedback.expression.score)
+        )
+    if current.feedback.voice.metrics and _prev_modal_has_data(prev, 'voice'):
+        deltas.append(
+            _delta('음성', _feedback_score(prev, 'voice'), current.feedback.voice.score)
+        )
+    deltas.append(
+        _delta('답변', _feedback_score(prev, 'answer'), current.feedback.answer.score)
+    )
     return InterviewComparison(
         previous_result_id=str(prev.get('meta', {}).get('result_id') or ''),
         previous_date=str(prev.get('meta', {}).get('conducted_at') or ''),
@@ -276,6 +290,20 @@ def _feedback_score(result: dict, modal: str) -> int:
     if isinstance(feedback, dict):
         return _score(feedback, modal)
     return 0
+
+
+def _prev_modal_has_data(result: dict, modal: str) -> bool:
+    """저장된 직전 결과의 feedback.<modal> 에 실제 지표(metrics)가 있었는지.
+
+    빈 모달(데이터 미수신)은 metrics 가 비어 score=0 이다 — 이 0 을 실제 0점으로
+    오해해 비교에 넣지 않도록, 지표가 있는 모달만 비교 대상으로 본다.
+    """
+    feedback = result.get('feedback')
+    if isinstance(feedback, dict):
+        section = feedback.get(modal)
+        if isinstance(section, dict):
+            return bool(section.get('metrics'))
+    return False
 
 
 def get_result_by_company(
