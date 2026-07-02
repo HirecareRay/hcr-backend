@@ -81,7 +81,7 @@ app = FastAPI(title=settings.app_name, lifespan=lifespan)
 # 프론트(Next.js)에서 호출할 수 있도록 CORS 허용
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[settings.frontend_origin],
+    allow_origins=[settings.frontend_origin.split(",")],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

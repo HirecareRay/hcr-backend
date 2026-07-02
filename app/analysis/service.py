@@ -455,3 +455,30 @@ async def analyze_fit(
     finally:
         event.set()
         _in_flight.pop(flight_key, None)
+
+
+def list_fit_history(mongo: Database, user_id: str) -> list[dict]:
+    """그 유저의 적합도 분석 기록을 최신순 카드 목록으로 요약한다(유저분석 탭).
+
+    fit_analyses 저장 시점의 완성품에서 카드에 필요한 필드만 뽑는다 — LLM 재호출 0.
+    """
+    docs = mongo.fit_analyses.find(
+        {"user_id": user_id},
+        {
+            "company_id": 1, "company_name": 1,
+            "job_posting_id": 1, "job_title": 1, "job_names": 1,
+            "analyzed_at": 1,
+        },
+    ).sort("analyzed_at", -1)
+    return [
+        {
+            "analysis_id": str(d["_id"]),
+            "company_id": d.get("company_id"),
+            "company_name": d.get("company_name"),
+            "job_posting_id": d.get("job_posting_id"),
+            "job_title": d.get("job_title"),
+            "job_names": d.get("job_names") or [],
+            "analyzed_at": d.get("analyzed_at"),
+        }
+        for d in docs
+    ]
