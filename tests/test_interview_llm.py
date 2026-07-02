@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app.interview import llm
+from app.interview.personas import CULTURE, assign_interviewers
 
 
 def _fake_chat_client(create: AsyncMock) -> SimpleNamespace:
@@ -52,7 +53,9 @@ def test_main_questions_splits_lines_and_limits_count(monkeypatch):
     )
     monkeypatch.setattr(llm, '_get_client', lambda: _fake_chat_client(create))
 
-    questions = asyncio.run(llm.generate_main_questions('회사 컨텍스트', '', '', 3))
+    questions = asyncio.run(
+        llm.generate_main_questions('회사 컨텍스트', '', '', assign_interviewers(3))
+    )
 
     assert questions == ['자기소개 부탁드립니다', '지원 동기는?', '강점은?']
     assert create.await_args.kwargs['model'] == 'gpt-4o-mini'  # 저가 모델 고정
@@ -65,7 +68,9 @@ def test_main_questions_dedupes_preserving_order(monkeypatch):
     )
     monkeypatch.setattr(llm, '_get_client', lambda: _fake_chat_client(create))
 
-    questions = asyncio.run(llm.generate_main_questions('회사 컨텍스트', '', '', 4))
+    questions = asyncio.run(
+        llm.generate_main_questions('회사 컨텍스트', '', '', assign_interviewers(4))
+    )
 
     assert questions == ['자기소개 부탁드립니다', '지원 동기는?']
 
@@ -76,7 +81,7 @@ def test_main_questions_api_error_raises_friendly(monkeypatch):
     monkeypatch.setattr(llm, '_get_client', lambda: _fake_chat_client(create))
 
     with pytest.raises(RuntimeError, match='면접'):
-        asyncio.run(llm.generate_main_questions('ctx', '', '', 4))
+        asyncio.run(llm.generate_main_questions('ctx', '', '', assign_interviewers(4)))
 
 
 # ── generate_follow_up ────────────────────────────────────────────
@@ -87,7 +92,7 @@ def test_follow_up_returns_trimmed_question(monkeypatch):
     create = AsyncMock(return_value=_completion('  그 경험에서 가장 어려웠던 점은?  '))
     monkeypatch.setattr(llm, '_get_client', lambda: _fake_chat_client(create))
 
-    text = asyncio.run(llm.generate_follow_up('자기소개', '협업을 잘합니다'))
+    text = asyncio.run(llm.generate_follow_up('자기소개', '협업을 잘합니다', CULTURE))
 
     assert text == '그 경험에서 가장 어려웠던 점은?'
 
