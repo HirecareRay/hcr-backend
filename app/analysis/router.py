@@ -43,3 +43,13 @@ async def analyze_fit(
         )
     except service.JobPostingNotFound:
         raise HTTPException(status_code=404, detail="채용공고를 찾을 수 없습니다.")
+
+
+@router.get("/fit/history")
+async def list_fit_history(
+    request: Request,
+    user_id: str = Depends(_user_id),
+):
+    """그 유저의 적합도 분석 기록을 최신순 카드 목록으로 조회한다(유저분석 탭)."""
+    mongo = get_mongo_db(request)
+    return {"success": True, "data": service.list_fit_history(mongo, user_id)}
