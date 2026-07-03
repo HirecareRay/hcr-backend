@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     # 앱 기본 정보
     app_name: str = "HCR Backend"
     debug: bool = False
-
+    env: str = "dev"
     # CORS 허용 출처 (프론트 개발 서버)
     frontend_origin: str = "http://localhost:3000"
 
