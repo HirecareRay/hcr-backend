@@ -75,8 +75,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         yield
     # ExitStack 블록을 벗어나며 mongo close · engine.dispose 가 자동 실행됨
 
-
-app = FastAPI(title=settings.app_name, lifespan=lifespan)
+app = FastAPI(
+    title=settings.app_name,
+    lifespan=lifespan,
+    docs_url=None if settings.env == "prod" else "/docs",
+    redoc_url=None if settings.env == "prod" else "/redoc",
+    openapi_url=None if settings.env == "prod" else "/openapi.json",
+)
 
 # 프론트(Next.js)에서 호출할 수 있도록 CORS 허용
 app.add_middleware(
@@ -124,4 +129,4 @@ def db_health_check(request: Request):
 
 @app.get("/")
 def root():
-    return {"message": "HCR Backend 동작 중. 문서는 /docs 참고"}
+    return {"message": "HCR Backend 동작 중"}
