@@ -3,12 +3,28 @@ fastapi
 uvicorn[standard]
 pydantic-settings
 
-# DB 연동 단계에서 추가 예정
-# sqlalchemy
-# pymysql        # MariaDB
-# pymongo        # MongoDB
+# DB 연동
+sqlalchemy
+pymysql        # MariaDB 드라이버 (report.py 의 mysql+pymysql URL 이 사용)
+mariadb        # MariaDB 공식 드라이버 (develop)
+pymongo        # MongoDB
+python-multipart  # 문서 업로드(Form/UploadFile) 처리
 
-# LLM 연동 단계에서 추가 예정
-# langchain
-# langchain-openai
-# openai
+# 인증 (회원가입·로그인)
+bcrypt            # 비밀번호 해시·검증
+pyjwt             # JWT 발급·검증
+email-validator   # Pydantic EmailStr 검증
+
+# STT(실시간 전사) — OpenAI Whisper/gpt-4o-mini-transcribe
+openai
+
+# 머신러닝 및 임베딩 모델
+torch
+sentence-transformers
+
+# PDF 및 문서 처리
+pymupdf           # fitz 라이브러리 사용을 위한 패키지 명칭
+
+# LLM 연동 단계(Phase 3)
+langchain-core
+langchain-openai
