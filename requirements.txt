@@ -17,9 +17,9 @@ email-validator   # Pydantic EmailStr 검증
 # STT(실시간 전사) — OpenAI Whisper/gpt-4o-mini-transcribe
 openai
 
-# # 머신러닝 및 임베딩 모델
-# torch
-# sentence-transformers
+# 머신러닝 및 임베딩 모델
+torch
+sentence-transformers
 
 # PDF 및 문서 처리
 pymupdf           # fitz 라이브러리 사용을 위한 패키지 명칭
