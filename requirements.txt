@@ -1,4 +1,4 @@
-# FastAPI 백엔드 핵심 의존성 (뼈대 단계)
+# FastAPI 백엔드 핵심 의존성
 fastapi
 uvicorn[standard]
 pydantic-settings
