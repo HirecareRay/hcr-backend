@@ -1,0 +1,10 @@
+# 개발·테스트 전용 의존성 (운영 배포에는 불필요)
+# 설치: pip install -r requirements-dev.txt
+
+-r requirements.txt
+
+pytest            # 테스트 러너
+httpx             # FastAPI TestClient 가 내부적으로 사용
+mongomock         # MongoDB 인메모리 가짜 — repository 통합 테스트(실 DB·네트워크 불필요)
+ruff              # 린터 + 포매터
+mypy              # 정적 타입체크
