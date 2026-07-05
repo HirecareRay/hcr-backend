@@ -3,9 +3,10 @@
 요약 시점에 LLM 종합 1회로 결과를 조립해 MongoDB 에 저장한다(완성품 저장 — 계약 ④).
 REST 는 저장된 완성품을 그대로 조회한다(LLM 재호출 0).
 
-WS summary 이벤트(계약 ② 라이브 채점)와는 별개다 — summary 는 service.build_summary
-가 그대로 책임진다(언어 점수 + 비언어 감점). 여기 영속화는 결과 페이지(계약 ④)
-전용이며, 저장 실패가 면접 종료를 막지 않도록 모든 예외를 흡수한다(데모 보호).
+WS summary 이벤트(계약 ② 라이브 채점)도 이 결과에서 파생한다 — 리포트가 유일한 채점
+소스라, 끝나자마자 보는 라이브 종합점수와 나중에 조회하는 결과 페이지 종합점수가 항상
+일치한다(service.summary_from_result). 저장 실패가 면접 종료·라이브 summary 송신을
+막지 않도록 모든 예외를 흡수한다(데모 보호).
 
 레이어 원칙: LLM=llm.py, 변환=result_builder.py, DB=result_repository.py. 여기서는
 그 경계들을 조립한다.
@@ -60,11 +61,15 @@ async def summarize_and_persist(
     started_at: datetime,
     mongo: Database | None,
 ) -> SummaryEvent:
-    """요약 시점 마무리 — 비언어·음성을 집계해 WS summary 를 만들고 결과를 영속화한다.
+    """요약 시점 마무리 — 결과 리포트(계약 ④)를 만들어 저장하고, 그걸로 라이브 summary(계약 ②)를 파생한다.
 
-    라우터는 WS I/O 만 하도록, 비언어/음성 집계·요약·영속화 오케스트레이션을 여기로
-    모은다(레이어 원칙). 집계는 한 번만 해서 summary(계약 ②)와 결과 저장(계약 ④)이
-    같은 지표를 공유한다. 집계 실패는 빈 지표로 우회한다(면접 종료를 막지 않음).
+    리포트가 유일한 채점 소스다 — 끝나자마자 보는 라이브 summary 의 종합점수와 나중에
+    조회하는 결과 페이지의 overall.score 가 항상 일치하도록, LLM 종합 1회로 두 산출물을
+    같은 결과에서 낸다(예전엔 요약·리포트를 각각 LLM 으로 뽑아 두 종합점수가 어긋났다).
+    표정·음성은 결과 페이지에서 별도 모달로 점수화하므로 라이브 종합점수엔 섞지 않는다.
+
+    라우터는 WS I/O 만 하도록, 집계·리포트·영속화 오케스트레이션을 여기로 모은다(레이어
+    원칙). 집계·저장 실패는 안전 기본값으로 우회한다(면접 종료를 막지 않음 — 데모 보호).
     반환한 SummaryEvent 는 라우터가 그대로 송신한다.
     """
     try:
@@ -73,62 +78,74 @@ async def summarize_and_persist(
         logger.error('비언어 집계 실패, 빈 지표로 요약 진행: %s', error)
         metrics = NonverbalMetrics()
     voice_metrics = voice.aggregate(voice_frames)
-    # WS summary(계약 ② 라이브 채점)는 기존 경로 그대로 — 언어 점수 + 비언어 감점.
-    summary = await service.build_summary(history, metrics)
-    # 결과 페이지(계약 ④)용 영속화는 별개다 — 저장만 하고 송신하지 않는다(실패 흡수).
-    await persist_result(
-        history=history,
-        metrics=metrics,
-        voice_metrics=voice_metrics,
-        user_id=user_id,
-        company_id=company_id,
-        job_title=job_title,
-        mode=mode,
-        started_at=started_at,
-        mongo=mongo,
-    )
-    return summary
+    try:
+        result = await _build_result(
+            history=history,
+            metrics=metrics,
+            voice_metrics=voice_metrics,
+            user_id=user_id,
+            company_id=company_id,
+            job_title=job_title,
+            mode=mode,
+            started_at=started_at,
+            mongo=mongo,
+        )
+    except Exception as error:  # noqa: BLE001 - 결과 조립 실패가 면접 종료를 막지 않게
+        logger.error('결과 조립 실패, 기본 요약으로 우회: %s', error)
+        return service.fallback_summary(metrics)
+    # 저장 가능하면 저장한다(계약 ④). 라이브 summary 는 저장 여부와 무관하게 이 결과로 파생한다.
+    _persist(mongo, user_id, company_id, result)
+    return service.summary_from_result(result, metrics)
 
 
-async def persist_result(
+async def _build_result(
     *,
     history: tuple[service.Turn, ...],
     metrics: NonverbalMetrics,
-    voice_metrics: VoiceMetrics | None = None,
+    voice_metrics: VoiceMetrics | None,
     user_id: str,
     company_id: str | None,
     job_title: str | None,
     mode: InterviewMode,
     started_at: datetime,
     mongo: Database | None,
-) -> None:
-    """결과 페이지(계약 ④)용 InterviewResult 를 조립해 MongoDB 에 저장한다.
+) -> InterviewResult:
+    """LLM 종합 1회로 결과(계약 ④)를 조립한다(저장은 하지 않음 — 라이브 summary 도 이 결과로 파생).
 
-    저장할 곳(mongo)이 없으면 LLM 도 호출하지 않고 즉시 반환한다 — 저장 못 할 결과를
-    위해 빌린 OpenAI 키를 낭비하지 않는다(테스트·DB 미연결 환경에서 실 API 도 안 탄다).
-    LLM 종합 1회로 언어 영역을 채우고, 표정 모달은 비언어 집계(metrics)에서, 음성 모달은
-    음성 집계(voice_metrics)에서 환산한다 — 데이터가 없으면 빈 모달로 정직하게 비운다.
-    직전 세션과 비교해 comparison 을 붙여 저장한다. 모든 예외를 흡수한다 — 영속화
-    실패는 면접 종료를 막지 않는다.
+    라이브 summary 와 결과 페이지가 같은 결과를 공유하도록 저장 가능 여부와 무관하게
+    만든다. 전부 무응답이면 _generate_report 가 LLM 없이 빈 dict 를 줘 builder 가 정직한
+    0점으로 우회한다(없는 강점·점수를 지어내지 않음). LLM 장애도 빈 dict 로 흡수돼 결과가
+    끊기지 않는다. 표정 모달은 비언어 집계(metrics)에서, 음성 모달은 음성 집계에서 환산한다.
+    """
+    report = await _generate_report(history, job_title)
+    meta = _build_meta(history, user_id, company_id, job_title, mode, started_at, mongo)
+    # 표정·음성 모달은 각 집계에서 환산한다(데이터 없으면 None → builder 가 빈 모달).
+    expression_modal = nonverbal.to_modal_feedback(metrics)
+    voice_modal = voice.to_modal_feedback(voice_metrics) if voice_metrics else None
+    return result_builder.build_result(
+        meta=meta,
+        history=history,
+        report=report,
+        expression=expression_modal,
+        voice=voice_modal,
+    )
+
+
+def _persist(
+    mongo: Database | None,
+    user_id: str,
+    company_id: str | None,
+    result: InterviewResult,
+) -> None:
+    """결과를 MongoDB 에 저장한다(저장할 곳이 없거나 실패해도 면접 종료를 막지 않는다).
+
+    직전 세션과 비교해 comparison 을 붙여 저장한다. 저장은 결과 페이지(계약 ④) 전용이며,
+    실패해도 라이브 summary 송신·면접 종료를 막지 않도록 모든 예외를 흡수한다(데모 보호).
     """
     if mongo is None:
         return
     try:
-        report = await _generate_report(history, job_title)
-        meta = _build_meta(
-            history, user_id, company_id, job_title, mode, started_at, mongo
-        )
-        # 표정·음성 모달은 각 집계에서 환산한다(데이터 없으면 None → builder 가 빈 모달).
-        expression_modal = nonverbal.to_modal_feedback(metrics)
-        voice_modal = voice.to_modal_feedback(voice_metrics) if voice_metrics else None
-        result = result_builder.build_result(
-            meta=meta,
-            history=history,
-            report=report,
-            expression=expression_modal,
-            voice=voice_modal,
-        )
-        _persist_with_comparison(mongo, user_id, company_id, meta, result)
+        _persist_with_comparison(mongo, user_id, company_id, result.meta, result)
     except Exception as error:  # noqa: BLE001 - 영속화 실패가 면접 종료를 막지 않게
         logger.error('면접 결과 영속화 실패(결과 페이지에서 누락될 수 있음): %s', error)
 

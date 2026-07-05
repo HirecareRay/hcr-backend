@@ -2,7 +2,7 @@
 
 프론트(MediaPipe)가 ~1s 주기로 보내는 얼굴 랜드마크와 이벤트(종류·메타)를 받아
 시선이탈률·고개흔들림·표정분포·이벤트카운트로 집계하고, 사람이 읽는 피드백
-문장(describe)과 최종 점수 가감치(score_penalty)로 변환한다.
+문장(describe)과 결과 페이지 표정 모달(to_modal_feedback)로 변환한다.
 
 레이어 원칙: 부수효과 없는 순수함수 모듈(context·llm·stt 와 같은 경계 계층).
 라우터는 누적만, 서비스는 조립만, 집계 수식은 전부 여기에 격리한다.
@@ -33,12 +33,6 @@ _EVENT_ATTENTION_PENALTY = 5
 
 # 시선이 화면 중앙에서 이 값을 넘게 벗어나면 "이탈"로 본다(정규화 좌표, 0=중앙).
 GAZE_OFF_THRESHOLD = 0.3
-# 시선이탈률 100% 일 때의 최대 감점, 고개흔들림·부정 이벤트의 감점 단위.
-GAZE_PENALTY_WEIGHT = 12.0
-HEAD_PENALTY_WEIGHT = 8.0
-EVENT_PENALTY_UNIT = 0.5
-# 비언어가 점수를 왜곡하지 않도록 둔 감점 하한(아무리 나빠도 이보다 더 깎지 않음).
-MAX_PENALTY = -20.0
 # 고개흔들림 표준편차(deg)를 0~1 로 정규화할 때의 기준치.
 HEAD_MOVEMENT_SCALE = 30.0
 # describe 가 "높음/큼"으로 표현할 비율·움직임 임계(피드백 문구용 — 좌표 임계와 무관).
@@ -126,18 +120,6 @@ def describe(metrics: NonverbalMetrics) -> str:
         summary = ', '.join(f'{name} {count}회' for name, count in metrics.event_counts.items())
         parts.append(f'주요 이벤트: {summary}')
     return '. '.join(parts) + '.'
-
-
-def score_penalty(metrics: NonverbalMetrics) -> float:
-    """비언어 지표를 overall_score 에 더할 가감치로 환산한다(데이터 없으면 0.0)."""
-    if not metrics.has_data:
-        return 0.0
-    penalty = (
-        -metrics.gaze_off_ratio * GAZE_PENALTY_WEIGHT
-        - min(metrics.head_movement, 1.0) * HEAD_PENALTY_WEIGHT
-        - sum(metrics.event_counts.values()) * EVENT_PENALTY_UNIT
-    )
-    return max(penalty, MAX_PENALTY)
 
 
 def _gaze_off_ratio(frames: tuple[LandmarkFrameMessage, ...]) -> float:

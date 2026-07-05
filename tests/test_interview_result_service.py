@@ -11,7 +11,6 @@ from datetime import datetime, timezone
 from unittest.mock import AsyncMock, Mock
 
 from app.interview import result_builder, result_repository, result_service, service
-from app.interview.nonverbal import NonverbalMetrics
 from app.interview.result_schemas import ResultMeta
 
 
@@ -39,40 +38,56 @@ def _result_dump(overall=78, answer=82):
     return result.model_dump(by_alias=False)
 
 
-# ── persist_result: 비용 단축 ──────────────────────────────────────────
+# ── summarize_and_persist: 단일 채점 소스(리포트) + 조건부 저장 ─────────────
 
 
-def test_persist_skips_llm_and_save_when_no_mongo(monkeypatch):
-    """저장할 곳(mongo)이 없으면 LLM·저장을 모두 생략한다(빌린 키 낭비 방지)."""
-    gen = AsyncMock()
-    save = Mock()
-    monkeypatch.setattr('app.interview.llm.generate_report', gen)
-    monkeypatch.setattr(result_repository, 'save_session_result', save)
-
-    asyncio.run(
-        result_service.persist_result(
-            history=(service.Turn('q', 'a', 'e', 'common'),),
-            metrics=NonverbalMetrics(),
+def _summarize(monkeypatch, *, history, mongo, job_title='마케팅'):
+    """summarize_and_persist 를 빈 비언어/음성 입력으로 실행하는 헬퍼."""
+    return asyncio.run(
+        result_service.summarize_and_persist(
+            history=history,
+            landmarks=(),
+            events=(),
+            voice_frames=(),
             user_id='u1',
-            company_id=None,
-            job_title='마케팅',
+            company_id=None,  # company 조회 우회(회사명 빈 값)
+            job_title=job_title,
             mode='voice',
             started_at=datetime.now(timezone.utc),
-            mongo=None,
+            mongo=mongo,
         )
     )
-    gen.assert_not_called()
-    save.assert_not_called()
 
 
-def test_persist_saves_with_first_attempt_comparison_none(monkeypatch):
-    """첫 면접이면 comparison 은 None 이고, 완성 결과가 저장된다."""
-    fake_report = {
+def test_summarize_skips_save_but_still_summarizes_without_mongo(monkeypatch):
+    """저장할 곳(mongo)이 없어도 라이브 summary 는 리포트에서 파생돼 내려간다(저장만 생략)."""
+    report = {
+        'overall': {'score': 77, 'grade': 'B', 'headline': 'h'},
+        'answer_feedback': {'score': 77, 'summary': '논리적', 'metrics': []},
+    }
+    monkeypatch.setattr(
+        'app.interview.llm.generate_report', AsyncMock(return_value=report)
+    )
+    save = Mock()
+    monkeypatch.setattr(result_repository, 'save_session_result', save)
+
+    summary = _summarize(
+        monkeypatch,
+        history=(service.Turn('q', 'a', 'e', 'common'),),
+        mongo=None,
+    )
+    save.assert_not_called()  # 저장 못 하면 저장은 생략
+    assert summary.overall_score == 77.0  # 그래도 리포트에서 종합점수 파생
+
+
+def test_summarize_saves_and_summary_matches_report(monkeypatch):
+    """저장된 결과의 overall.score 와 라이브 summary 종합점수가 일치한다(단일 소스)."""
+    report = {
         'overall': {'score': 78, 'grade': 'B+', 'headline': '안정'},
         'answer_feedback': {'score': 82, 'summary': '논리', 'metrics': []},
     }
     monkeypatch.setattr(
-        'app.interview.llm.generate_report', AsyncMock(return_value=fake_report)
+        'app.interview.llm.generate_report', AsyncMock(return_value=report)
     )
     monkeypatch.setattr(result_repository, 'find_latest_by_user', Mock(return_value=None))
     monkeypatch.setattr(result_repository, 'count_by_user', Mock(return_value=0))
@@ -80,28 +95,22 @@ def test_persist_saves_with_first_attempt_comparison_none(monkeypatch):
     monkeypatch.setattr(
         result_repository,
         'save_session_result',
-        Mock(side_effect=lambda db, doc: saved.update(doc) or doc['result_id']),
+        Mock(side_effect=lambda db, doc: saved.update(doc)),
     )
 
-    asyncio.run(
-        result_service.persist_result(
-            history=(service.Turn('자기소개', '안녕', '명확', 'common'),),
-            metrics=NonverbalMetrics(),
-            user_id='u1',
-            company_id=None,  # company 조회를 우회(회사명 빈 값)
-            job_title='마케팅',
-            mode='voice',
-            started_at=datetime.now(timezone.utc),
-            mongo=object(),  # repository 가 mock 이라 내용은 보지 않음
-        )
+    summary = _summarize(
+        monkeypatch,
+        history=(service.Turn('자기소개', '안녕', '명확', 'common'),),
+        mongo=object(),
     )
     assert saved['user_id'] == 'u1'
     assert saved['result']['overall']['score'] == 78
     assert saved['result']['comparison'] is None  # 첫 면접
+    assert summary.overall_score == 78.0  # 저장값 == 라이브 summary(어긋나지 않음)
 
 
-def test_persist_skips_llm_when_all_answers_empty(monkeypatch):
-    """전부 무응답이면 리포트 LLM 을 부르지 않고, 강점 없이 0점으로 정직하게 저장한다."""
+def test_summarize_skips_llm_when_all_answers_empty(monkeypatch):
+    """전부 무응답이면 리포트 LLM 을 부르지 않고, 강점 없이 0점으로 정직하게 저장·요약한다."""
     gen = AsyncMock(return_value={'strengths': ['지어낸 강점'], 'overall': {'score': 70}})
     monkeypatch.setattr('app.interview.llm.generate_report', gen)
     monkeypatch.setattr(result_repository, 'find_latest_by_user', Mock(return_value=None))
@@ -113,49 +122,64 @@ def test_persist_skips_llm_when_all_answers_empty(monkeypatch):
         Mock(side_effect=lambda db, doc: saved.update(doc)),
     )
 
-    asyncio.run(
-        result_service.persist_result(
-            history=(
-                service.Turn('자기소개', '', '', 'common'),  # 무응답
-                service.Turn('지원동기', '   ', '', 'common'),  # 공백만
-            ),
-            metrics=NonverbalMetrics(),
-            user_id='u1',
-            company_id=None,
-            job_title='마케팅',
-            mode='voice',
-            started_at=datetime.now(timezone.utc),
-            mongo=object(),
-        )
+    summary = _summarize(
+        monkeypatch,
+        history=(
+            service.Turn('자기소개', '', '', 'common'),  # 무응답
+            service.Turn('지원동기', '   ', '', 'common'),  # 공백만
+        ),
+        mongo=object(),
     )
     gen.assert_not_called()  # 빌린 키 낭비 방지 + 환각 차단
     assert saved['result']['strengths'] == []
     assert saved['result']['overall']['score'] == 0
+    assert summary.overall_score == 0.0
 
 
-def test_persist_failure_is_swallowed(monkeypatch):
-    """저장 중 예외가 나도 전파되지 않는다(면접 종료를 막지 않음)."""
+def test_summarize_survives_persist_failure(monkeypatch):
+    """저장 중 예외가 나도 라이브 summary 는 내려간다(면접 종료를 막지 않음)."""
     monkeypatch.setattr(
-        'app.interview.llm.generate_report', AsyncMock(return_value={})
+        'app.interview.llm.generate_report',
+        AsyncMock(
+            return_value={
+                'overall': {'score': 65, 'grade': 'C+', 'headline': 'h'},
+                'answer_feedback': {'score': 65, 'summary': 's', 'metrics': []},
+            }
+        ),
     )
     monkeypatch.setattr(
         result_repository,
         'find_latest_by_user',
         Mock(side_effect=RuntimeError('db down')),
     )
-    # 예외가 전파되면 이 테스트가 실패한다(흡수되어야 정상)
-    asyncio.run(
-        result_service.persist_result(
-            history=(service.Turn('q', 'a', 'e', 'common'),),
-            metrics=NonverbalMetrics(),
-            user_id='u1',
-            company_id=None,
-            job_title=None,
-            mode='text',
-            started_at=datetime.now(timezone.utc),
-            mongo=object(),
-        )
+    # 저장 예외가 전파되면 summary 를 못 받아 이 테스트가 실패한다(흡수되어야 정상)
+    summary = _summarize(
+        monkeypatch,
+        history=(service.Turn('q', 'a', 'e', 'common'),),
+        mongo=object(),
     )
+    assert summary.overall_score == 65.0  # 저장 실패해도 요약은 내려간다
+
+
+def test_summarize_falls_back_when_build_result_raises(monkeypatch):
+    """결과 조립이 예외를 던져도 기본 요약을 내려보낸다(면접이 끊기지 않게 — 데모 보호)."""
+    monkeypatch.setattr(
+        result_service,
+        '_build_result',
+        AsyncMock(side_effect=RuntimeError('조립 폭발')),
+    )
+    save = Mock()
+    monkeypatch.setattr(result_repository, 'save_session_result', save)
+
+    summary = _summarize(
+        monkeypatch,
+        history=(service.Turn('q', 'a', 'e', 'common'),),
+        mongo=object(),
+    )
+    assert summary.type == 'summary'
+    assert summary.overall_score == 0.0  # 안전 기본 요약
+    assert summary.language_feedback  # 비어 있지 않은 안내 문구
+    save.assert_not_called()  # 조립이 터졌으니 저장 경로도 타지 않는다
 
 
 # ── comparison ────────────────────────────────────────────────────────
