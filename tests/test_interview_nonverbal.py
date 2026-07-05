@@ -54,7 +54,6 @@ def test_all_none_frames_are_not_treated_as_data():
     assert metrics.detected_frames == 0
     assert metrics.has_data is False
     assert nonverbal.to_modal_feedback(metrics) is None  # 빈 모달로 정직하게 비움
-    assert nonverbal.score_penalty(metrics) == 0.0  # 가짜 감점·가점 없음
 
 
 def test_too_few_detected_frames_are_not_data():
@@ -161,28 +160,6 @@ def test_describe_mentions_gaze_when_off_ratio_high():
     frames = tuple(_frame(gaze_x=0.9) for _ in range(5))
     text = nonverbal.describe(nonverbal.aggregate(frames, ()))
     assert '시선' in text
-
-
-# ── score_penalty: 점수 가감치 ────────────────────────────────────
-
-
-def test_score_penalty_zero_without_data():
-    """데이터가 없으면 점수에 영향을 주지 않는다(0.0)."""
-    assert nonverbal.score_penalty(nonverbal.aggregate((), ())) == 0.0
-
-
-def test_score_penalty_negative_when_gaze_unstable():
-    """시선이탈이 심하면 감점(음수)된다."""
-    frames = tuple(_frame(gaze_x=0.9) for _ in range(5))
-    assert nonverbal.score_penalty(nonverbal.aggregate(frames, ())) < 0.0
-
-
-def test_score_penalty_bounded():
-    """감점은 과도하게 커지지 않도록 하한이 있다(점수 왜곡 방지)."""
-    frames = tuple(_frame(gaze_x=1.0) for _ in range(100))
-    events = tuple(_event('gaze_away') for _ in range(100))
-    penalty = nonverbal.score_penalty(nonverbal.aggregate(frames, events))
-    assert penalty >= nonverbal.MAX_PENALTY
 
 
 # ── to_modal_feedback: 결과 표정 모달 환산 (계약 ④) ────────────────

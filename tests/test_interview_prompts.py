@@ -26,6 +26,19 @@ def test_main_questions_messages_includes_panel_role_labels():
     assert CULTURE.focus in system
 
 
+def test_main_questions_messages_forbids_plural_audience():
+    """1:1 면접이므로 '여러분' 같은 복수 청자 표현 금지 규칙이 프롬프트에 들어간다."""
+    system = prompts.main_questions_messages('회사 컨텍스트', '', '', _PANEL4)[0]['content']
+    assert '여러분' in system  # 금지 규칙으로 명시
+    assert '1:1' in system
+
+
+def test_follow_up_messages_forbids_plural_audience():
+    """꼬리질문도 지원자 한 명에게 존댓말 — '여러분' 금지 규칙이 프롬프트에 들어간다."""
+    system = prompts.follow_up_messages('질문', '답변', TECH)[0]['content']
+    assert '여러분' in system
+
+
 def test_main_questions_messages_omits_applicant_block_when_no_user_context():
     """지원자 정보가 없으면 user 메시지에 회사 컨텍스트만 담긴다."""
     messages = prompts.main_questions_messages('회사 컨텍스트', '', '', _PANEL4)
@@ -82,12 +95,6 @@ def test_report_messages_embeds_scoring_rubric():
     system = prompts.report_messages('면접 기록', '백엔드')[0]['content']
     assert prompts.SCORING_RUBRIC in system
     assert '무조건 0점' in system  # 무응답 0점 규칙
-
-
-def test_summary_messages_embeds_scoring_rubric():
-    """라이브 요약 프롬프트도 같은 채점 기준을 공유한다(두 경로 점수 일관)."""
-    system = prompts.summary_messages('면접 기록')[0]['content']
-    assert prompts.SCORING_RUBRIC in system
 
 
 def test_evaluation_messages_embeds_scoring_rubric():

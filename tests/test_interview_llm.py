@@ -127,19 +127,7 @@ def test_stream_evaluation_api_error_raises_friendly(monkeypatch):
         asyncio.run(run())
 
 
-# ── generate_summary / _parse_summary ─────────────────────────────
-
-
-def test_generate_summary_parses_json(monkeypatch):
-    """JSON 응답을 dict 로 파싱해 반환."""
-    payload = '{"overall_score": 82, "language_feedback": "논리적", "improvements": ["결론 강화"]}'
-    create = AsyncMock(return_value=_completion(payload))
-    monkeypatch.setattr(llm, '_get_client', lambda: _fake_chat_client(create))
-
-    data = asyncio.run(llm.generate_summary('Q1...A1...'))
-
-    assert data['overall_score'] == 82
-    assert data['improvements'] == ['결론 강화']
+# ── _parse_summary (리포트 JSON 파싱) ─────────────────────────────
 
 
 def test_parse_summary_strips_code_fence():
