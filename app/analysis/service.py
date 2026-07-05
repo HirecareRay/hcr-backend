@@ -51,8 +51,8 @@ _CATEGORY_MAP = {
     "career": "경력사항",
     "education": "학력사항",
     "industry_domain": "산업 및 사업 분야",
-    "culture": "조직문화",
-    "talent_values": "인재상",
+    "culture": "인재상 및 조직문화",
+    "talent_values": "인재상 및 조직문화",
 }
 
 
