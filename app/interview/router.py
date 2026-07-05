@@ -26,9 +26,9 @@ from pydantic import BaseModel, TypeAdapter, ValidationError
 from pymongo.database import Database
 
 from app.auth.security import decode_access_token
-from app.core.config import settings
+from app.core.config import resolve_persona_voice, settings
 from app.db.mongo import get_mongo_db
-from app.interview import personas, result_service, service, tts, ws_origin, ws_ticket
+from app.interview import result_service, service, tts, ws_origin, ws_ticket
 from app.interview.personas import CULTURE, Persona
 from app.interview.result_schemas import InterviewHistoryList, InterviewResult
 from app.interview.schemas import (
@@ -201,9 +201,9 @@ async def synthesize_tts(
     _require_user(credentials)
     if not settings.interview_tts_enabled:
         raise _tts_disabled_error
-    voice_id = personas.persona_by_id(payload.persona_id).tts_voice_id
+    voice = resolve_persona_voice(payload.persona_id)
     try:
-        audio = await tts.synthesize(payload.text, voice_id)
+        audio = await tts.synthesize(payload.text, voice.voice_id, voice.as_voice_settings())
     except RuntimeError as error:
         logger.error('TTS 요청 처리 실패: %s', error)
         raise _tts_failed_error from error
