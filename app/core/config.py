@@ -45,6 +45,16 @@ class Settings(BaseSettings):
     # LLM·STT 연동 — 시크릿은 .env 에서만 채운다(코드·example 에 박지 않음)
     openai_api_key: str = ""
 
+    # TTS(면접관 음성) — ElevenLabs 백엔드 중계. 키는 .env 에서만 채운다(코드·example
+    # 에 박지 않음). interview_tts_enabled 가 false(기본)면 엔드포인트를 비활성화해
+    # 프론트 브라우저 SpeechSynthesis(무료)로 폴백한다 — 켜야 과금 경로가 열린다.
+    # 모델은 저지연·저가 flash 로 고정(바꾸면 지연·비용 변동). 한 요청 텍스트 상한으로
+    # 거대 입력 과금을 막는다.
+    elevenlabs_api_key: str = ""
+    interview_tts_enabled: bool = False
+    elevenlabs_model: str = "eleven_flash_v2_5"
+    interview_tts_max_chars: int = Field(600, ge=1, le=5000)
+
     # 면접 — 한 세션에서 LLM 이 생성할 메인 질문 수(꼬리질문은 별도). 비용·길이 상한.
     # 0·음수면 첫 질문 송신이 깨지고, 과도하면 토큰 비용이 급증하므로 1~10 으로 제한한다.
     interview_main_question_count: int = Field(4, ge=1, le=10)
@@ -64,6 +74,13 @@ class Settings(BaseSettings):
     # 부분 자막 재전사 간격(오디오 청크 N개마다 1회). 작을수록 자막이 자주 갱신되지만
     # 비용↑. 프론트 MediaRecorder timeslice 에 맞춰 튜닝한다. 1~50 으로 제한.
     interview_partial_transcript_every: int = Field(8, ge=1, le=50)
+
+    # 면접 결과 비언어·음성 모달의 최소 표본 — 이만큼 실제 신호가 쌓여야 점수를 낸다.
+    # 카메라·마이크가 잠깐만 켜져 1~2 프레임만 잡힌 경우를 '데이터 부족(빈 모달)'으로
+    # 처리해, 근거 없는 자신만만한 점수(예: 1프레임으로 시선 만점)를 막는다. 0 이면
+    # 사실상 비활성(1개만 있어도 점수 — 하한 1). 표정은 ~1s 주기라 5≈5초, 음성 3≈3초.
+    interview_min_expression_frames: int = Field(5, ge=0, le=100)
+    interview_min_voice_frames: int = Field(3, ge=0, le=100)
 
     # 면접 WS 입장 티켓 TTL(초) — 브라우저 WS 는 헤더를 못 붙이므로 JWT 대신 단기·
     # 1회용 티켓을 쿼리로 받는다. 짧을수록 URL 노출 위험이 줄지만 너무 짧으면 발급↔

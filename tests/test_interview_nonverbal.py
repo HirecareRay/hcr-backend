@@ -57,13 +57,34 @@ def test_all_none_frames_are_not_treated_as_data():
     assert nonverbal.score_penalty(metrics) == 0.0  # 가짜 감점·가점 없음
 
 
-def test_one_detected_frame_counts_as_data():
-    """빈 프레임 사이에 실제 신호 프레임이 하나라도 있으면 데이터로 인정한다."""
+def test_too_few_detected_frames_are_not_data():
+    """실제 신호 프레임이 최소 표본 미만이면 '데이터 부족'으로 본다(카메라 잠깐만 켜짐).
+
+    1~2 프레임만 잡힌 경우까지 점수를 내면 표본이 빈약한데 자신만만한 점수(예: 시선
+    만점)가 나온다 — 기준(interview_min_expression_frames=5) 미만은 빈 모달로 비운다.
+    """
     frames = (_frame(), _frame(gaze_x=0.0, gaze_y=0.0), _frame())
     metrics = nonverbal.aggregate(frames, ())
-    assert metrics.frame_count == 3
     assert metrics.detected_frames == 1
+    assert metrics.has_data is False
+    assert nonverbal.to_modal_feedback(metrics) is None
+
+
+def test_enough_detected_frames_count_as_data():
+    """실제 신호 프레임이 최소 표본 이상이면 데이터로 인정한다."""
+    frames = tuple(_frame(gaze_x=0.0, gaze_y=0.0) for _ in range(5))
+    metrics = nonverbal.aggregate(frames, ())
+    assert metrics.detected_frames == 5
     assert metrics.has_data is True
+
+
+def test_events_only_without_frames_are_not_data():
+    """이벤트만 있고 얼굴 프레임이 없으면 데이터로 보지 않는다(시선·자세 근거 없음)."""
+    events = tuple(_event('gaze_away') for _ in range(3))
+    metrics = nonverbal.aggregate((), events)
+    assert metrics.event_counts == {'gaze_away': 3}
+    assert metrics.has_data is False
+    assert nonverbal.to_modal_feedback(metrics) is None
 
 
 # ── aggregate: 시선이탈률 ─────────────────────────────────────────
@@ -137,7 +158,7 @@ def test_describe_returns_safe_message_when_no_data():
 
 def test_describe_mentions_gaze_when_off_ratio_high():
     """시선이탈이 잦으면 피드백에 시선 관련 언급이 포함된다."""
-    frames = (_frame(gaze_x=0.9), _frame(gaze_x=0.9))
+    frames = tuple(_frame(gaze_x=0.9) for _ in range(5))
     text = nonverbal.describe(nonverbal.aggregate(frames, ()))
     assert '시선' in text
 
@@ -191,7 +212,7 @@ def test_modal_stable_gaze_high_score():
 
 def test_modal_adds_attention_metric_when_events():
     """주의 이벤트가 있으면 '주의 집중' 지표가 붙고 이벤트 수만큼 깎인다."""
-    frames = tuple(_frame(gaze_x=0.0) for _ in range(3))
+    frames = tuple(_frame(gaze_x=0.0) for _ in range(5))
     events = tuple(_event('gaze_away') for _ in range(2))
     modal = nonverbal.to_modal_feedback(nonverbal.aggregate(frames, events))
     attention = next(m for m in modal.metrics if m.label == '주의 집중')

@@ -14,15 +14,20 @@ class Persona:
 
     id: str          # 안정 식별자(프론트 배지·목소리 매핑)
     role_label: str  # 화면 노출 라벨(질문과 함께 내려감)
-    voice: str       # TTS 목소리 힌트(프론트가 id→pitch/rate 또는 voice 로 매핑)
+    voice: str       # 프론트 SpeechSynthesis 폴백용 힌트(id→pitch/rate 매핑)
+    tts_voice_id: str  # ElevenLabs voice id(백엔드 TTS 중계용). 담당별로 다른 목소리.
     focus: str       # 담당 주제(내부 프롬프트 전용 — 노출 안 함)
     tone: str        # 말투 지시문(내부 프롬프트 전용 — 노출 안 함)
 
 
+# 담당별 ElevenLabs voice id — 성별·톤이 페르소나와 어울리는 공개 프리셋 목소리다.
+# 다국어 모델(eleven_flash_v2_5)이라 한국어도 이 id 로 발화된다. 자기 계정에서 고른
+# 목소리로 바꾸려면 이 id 만 교체하면 된다(비밀값 아님 — 코드에 두어도 안전).
 CULTURE = Persona(
     id='culture_fit',
     role_label='인사담당자',
     voice='soft_high',
+    tts_voice_id='EXAVITQu4vr4xnSDxMaL',  # Sarah — 부드럽고 따뜻한 여성 목소리
     focus='지원 동기, 협업 방식, 가치관, 갈등 해결, 성장 태도',
     tone='따뜻하고 공감적으로 묻는다. 지원자가 편하게 경험을 풀어놓도록 유도하고 '
     '사람·태도에 초점을 둔다. 몰아붙이지 않는다.',
@@ -32,6 +37,7 @@ TECH = Persona(
     id='tech_pressure',
     role_label='기술담당자',
     voice='low_firm',
+    tts_voice_id='pNInz6obpgDQGcFmaJgB',  # Adam — 낮고 단단한 남성 목소리
     focus='기술적 깊이, 문제 해결 과정, 설계 트레이드오프 판단, 실패·디버깅 경험',
     tone='직설적이고 냉정하게 파고든다. 두루뭉술한 답에는 근거·수치·구체 사례를 '
     '요구하고 군더더기 없이 핵심만 묻는다.',
@@ -41,6 +47,7 @@ PRACTICAL = Persona(
     id='practical',
     role_label='실무담당자',
     voice='calm_mid',
+    tts_voice_id='ErXwobaYiN019PkySvjV',  # Antoni — 차분한 중저음 남성 목소리
     focus='직무 적합성, 실제 업무 시나리오 대응, 우선순위 판단, 협업 도구·프로세스 경험',
     tone="현실적이고 시나리오 중심으로 묻는다. '이런 상황이면 어떻게 하겠냐'식으로 "
     '실제 업무를 가정해 구체적 행동을 확인한다.',

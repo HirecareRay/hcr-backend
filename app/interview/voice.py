@@ -16,8 +16,12 @@
 from dataclasses import dataclass
 from statistics import mean, pstdev
 
+from app.core.config import settings
 from app.interview.result_schemas import FeedbackMetric, ModalFeedback
 from app.interview.schemas import VoiceMetricMessage
+
+# 물리지표 필드 — 하나라도 값이 있으면 '신호 있는 프레임'으로 센다(전부 None = 무음/미장착).
+_SIGNAL_FIELDS = ('decibel', 'pitch', 'speech_rate', 'tremor')
 
 # 면접 발화의 적정 말속도 구간(WPM). 이 안이면 만점, 벗어날수록 선형 감점.
 SPEECH_RATE_MIN = 100.0
@@ -28,11 +32,21 @@ SPEECH_RATE_TOLERANCE = 60.0
 PITCH_STD_SCALE = 60.0
 
 
+def _min_voice_frames() -> int:
+    """음성 모달을 낼 최소 신호 프레임 수(1 하한 — 0 프레임은 절대 데이터가 아니다).
+
+    설정(interview_min_voice_frames)으로 튜닝한다. 마이크가 잠깐만 켜져 1~2 프레임만
+    잡힌 경우를 '데이터 부족'으로 눌러, 표본이 빈약한데 점수가 나오지 않게 한다.
+    """
+    return max(1, settings.interview_min_voice_frames)
+
+
 @dataclass(frozen=True)
 class VoiceMetrics:
     """집계된 음성 지표(불변). 결측 지표는 None — 해당 metric 을 생략하는 신호."""
 
-    frame_count: int = 0
+    frame_count: int = 0  # 수신한 voice_metric 수(전부 None 인 무음 프레임 포함)
+    signal_frames: int = 0  # 그중 물리지표가 실제로 하나라도 있던 프레임 수
     avg_speech_rate: float | None = None
     avg_decibel: float | None = None
     avg_tremor: float | None = None
@@ -40,19 +54,30 @@ class VoiceMetrics:
 
     @property
     def has_data(self) -> bool:
-        """집계할 음성 신호가 하나라도 있었는지."""
-        return self.frame_count > 0
+        """점수를 낼 만큼 실제 음성 신호가 충분히 쌓였는지.
+
+        frame_count(수신 수)가 아니라 signal_frames(값이 있던 프레임)를 최소 표본
+        기준(_min_voice_frames)과 비교한다 — 마이크가 꺼져 전 필드 None 인 프레임만
+        오거나 1~2 프레임뿐이면 False. nonverbal 의 detected_frames 판정과 대칭이다.
+        """
+        return self.signal_frames >= _min_voice_frames()
 
 
 def aggregate(frames: tuple[VoiceMetricMessage, ...]) -> VoiceMetrics:
     """누적된 voice_metric 프레임을 평균·안정도로 집계한다(결측·빈입력 안전)."""
     return VoiceMetrics(
         frame_count=len(frames),
+        signal_frames=sum(1 for frame in frames if _frame_has_signal(frame)),
         avg_speech_rate=_avg(frames, 'speech_rate'),
         avg_decibel=_avg(frames, 'decibel'),
         avg_tremor=_avg(frames, 'tremor'),
         pitch_instability=_pitch_instability(frames),
     )
+
+
+def _frame_has_signal(frame: VoiceMetricMessage) -> bool:
+    """프레임에 물리지표가 하나라도 있는지(전 필드 None = 무음/미장착 = False)."""
+    return any(getattr(frame, field) is not None for field in _SIGNAL_FIELDS)
 
 
 def describe(metrics: VoiceMetrics) -> str:

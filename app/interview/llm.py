@@ -29,6 +29,11 @@ _CHAT_MODEL = 'gpt-4o-mini'
 # 지표·강약점·보완점·턴별 평가·추천 질문)은 이 안에 충분히 들어간다.
 _REPORT_MAX_TOKENS = 2048
 
+# 채점 경로(리포트·요약·평가)의 temperature. 낮게 고정해 같은 답변이 매 호출 비슷한
+# 점수를 받도록 분산을 줄인다(루브릭 기준의 일관성 보강). 질문·꼬리질문 생성은 다양성이
+# 필요하므로 이 값을 쓰지 않고 모델 기본값(1.0)을 그대로 둔다.
+_SCORING_TEMPERATURE = 0.3
+
 # AsyncOpenAI 클라이언트는 지연 생성한다(import 시 키를 요구하지 않도록 — 테스트는
 # _get_client 를 mock 하므로 실 키 없이도 import·실행된다).
 _client: AsyncOpenAI | None = None
@@ -44,12 +49,22 @@ def _get_client() -> AsyncOpenAI:
     return _client
 
 
-async def _complete(messages: list[dict[str, str]]) -> str:
-    """채팅 완성 1회 호출 후 본문 텍스트를 다듬어 반환한다."""
+async def _complete(
+    messages: list[dict[str, str]], temperature: float | None = None
+) -> str:
+    """채팅 완성 1회 호출 후 본문 텍스트를 다듬어 반환한다.
+
+    temperature 를 주면 그 값으로 호출한다(채점 경로의 결정성 보강). None 이면 모델
+    기본값을 써 질문 생성 등 다양성이 필요한 경로의 창의성을 유지한다.
+    """
+    kwargs: dict = {}
+    if temperature is not None:
+        kwargs['temperature'] = temperature
     try:
         resp = await _get_client().chat.completions.create(
             model=_CHAT_MODEL,
             messages=cast(list[ChatCompletionMessageParam], messages),
+            **kwargs,
         )
         return (resp.choices[0].message.content or '').strip()
     except Exception as error:  # noqa: BLE001 - 외부 API 장애를 친화 메시지로 변환
@@ -95,6 +110,7 @@ async def stream_evaluation(question: str, answer: str) -> AsyncIterator[str]:
                 list[ChatCompletionMessageParam],
                 prompts.evaluation_messages(question, answer),
             ),
+            temperature=_SCORING_TEMPERATURE,
             stream=True,
         )
         async for chunk in stream:
@@ -108,7 +124,9 @@ async def stream_evaluation(question: str, answer: str) -> AsyncIterator[str]:
 
 async def generate_summary(transcript: str) -> dict:
     """면접 기록으로 최종 요약(JSON)을 생성·파싱한다(실패 시 빈 dict)."""
-    text = await _complete(prompts.summary_messages(transcript))
+    text = await _complete(
+        prompts.summary_messages(transcript), temperature=_SCORING_TEMPERATURE
+    )
     return _parse_summary(text)
 
 
@@ -127,6 +145,7 @@ async def generate_report(transcript: str, job_title: str) -> dict:
                 list[ChatCompletionMessageParam],
                 prompts.report_messages(transcript, job_title),
             ),
+            temperature=_SCORING_TEMPERATURE,
             response_format={'type': 'json_object'},
             # 출력 토큰 상한 — 비정상적으로 긴 결과로 과금이 폭주하지 않게 묶는다.
             # 초과로 JSON 이 잘리면 파싱 실패 → 빈 dict → 안전 기본값으로 우회한다.
