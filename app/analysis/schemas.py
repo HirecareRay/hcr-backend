@@ -169,7 +169,7 @@ class CompanyMatch(BaseModel):
 
 
 class CategorySummary(BaseModel):
-    category: str = Field(description="'자격요건' | '우대사항' | '주요업무' | '기술·도구' | '경력사항' | '학력사항' | '산업 및 사업 분야' | '조직문화' | '인재상'")
+    category: str = Field(description="'자격요건' | '우대사항' | '주요업무' | '기술·도구' | '경력사항' | '학력사항' | '산업 및 사업 분야' | '인재상 및 조직문화'")
     total: int
     matched: int
 
