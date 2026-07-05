@@ -20,7 +20,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 
 import jwt
-from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, status
+from fastapi import APIRouter, Depends, HTTPException, Response, WebSocket, WebSocketDisconnect, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, TypeAdapter, ValidationError
 from pymongo.database import Database
@@ -28,7 +28,7 @@ from pymongo.database import Database
 from app.auth.security import decode_access_token
 from app.core.config import settings
 from app.db.mongo import get_mongo_db
-from app.interview import result_service, service, ws_origin, ws_ticket
+from app.interview import personas, result_service, service, tts, ws_origin, ws_ticket
 from app.interview.personas import CULTURE, Persona
 from app.interview.result_schemas import InterviewHistoryList, InterviewResult
 from app.interview.schemas import (
@@ -37,6 +37,7 @@ from app.interview.schemas import (
     EventSnapshotMessage,
     LandmarkFrameMessage,
     TextAnswerMessage,
+    TtsRequest,
     UpstreamMessage,
     VoiceMetricMessage,
     WsTicketOut,
@@ -173,6 +174,40 @@ async def issue_ws_ticket(
         raise _ticket_auth_error from error
     ticket, expires_in = ws_ticket.issue_ticket(user_id)
     return WsTicketOut(ticket=ticket, expires_in=expires_in)
+
+
+_tts_disabled_error = HTTPException(
+    status_code=status.HTTP_404_NOT_FOUND,
+    detail='TTS 가 비활성화되어 있습니다',
+)
+_tts_failed_error = HTTPException(
+    status_code=status.HTTP_502_BAD_GATEWAY,
+    detail='면접관 음성 합성에 실패했습니다',
+)
+
+
+@router.post('/tts')
+async def synthesize_tts(
+    payload: TtsRequest,
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
+) -> Response:
+    """면접관 질문 텍스트를 음성(mp3)으로 합성해 반환한다(로그인 전용).
+
+    과금 경로(ElevenLabs 크레딧)라 프론트 가드가 아니라 여기서 로그인(JWT)을 실질
+    경계로 강제한다 — STT·WS 와 같은 원칙. interview_tts_enabled 가 꺼져 있으면 404 로
+    비활성을 알려 프론트가 브라우저 SpeechSynthesis(무료)로 폴백하게 한다. persona_id 로
+    담당 면접관 목소리를 고른다(알 수 없으면 진행자 폴백). 외부 장애는 502 로 변환한다.
+    """
+    _require_user(credentials)
+    if not settings.interview_tts_enabled:
+        raise _tts_disabled_error
+    voice_id = personas.persona_by_id(payload.persona_id).tts_voice_id
+    try:
+        audio = await tts.synthesize(payload.text, voice_id)
+    except RuntimeError as error:
+        logger.error('TTS 요청 처리 실패: %s', error)
+        raise _tts_failed_error from error
+    return Response(content=audio, media_type='audio/mpeg')
 
 
 def _require_user(credentials: HTTPAuthorizationCredentials | None) -> str:

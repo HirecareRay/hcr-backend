@@ -22,6 +22,23 @@ def test_aggregate_empty_has_no_data():
     assert metrics.avg_speech_rate is None
 
 
+def test_all_none_frames_are_not_data():
+    """마이크가 꺼져 전 필드 None 인 프레임만 오면 '데이터 부족'으로 본다(가짜 점수 방지)."""
+    metrics = voice.aggregate(tuple(_vm() for _ in range(10)))
+    assert metrics.frame_count == 10
+    assert metrics.signal_frames == 0
+    assert metrics.has_data is False
+    assert voice.to_modal_feedback(metrics) is None
+
+
+def test_too_few_signal_frames_are_not_data():
+    """신호 프레임이 최소 표본(interview_min_voice_frames=3) 미만이면 데이터로 보지 않는다."""
+    metrics = voice.aggregate((_vm(speech_rate=120.0), _vm(speech_rate=120.0)))
+    assert metrics.signal_frames == 2
+    assert metrics.has_data is False
+    assert voice.to_modal_feedback(metrics) is None
+
+
 def test_aggregate_averages_only_non_none():
     frames = (_vm(speech_rate=100.0), _vm(speech_rate=140.0), _vm(decibel=60.0))
     metrics = voice.aggregate(frames)

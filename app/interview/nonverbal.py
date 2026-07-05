@@ -15,8 +15,18 @@ from collections import Counter
 from dataclasses import dataclass, field
 from statistics import pstdev
 
+from app.core.config import settings
 from app.interview.result_schemas import FeedbackMetric, ModalFeedback
 from app.interview.schemas import EventSnapshotMessage, LandmarkFrameMessage
+
+
+def _min_expression_frames() -> int:
+    """표정 모달을 낼 최소 얼굴 신호 프레임 수(1 하한 — 0 프레임은 절대 데이터가 아니다).
+
+    설정(interview_min_expression_frames)으로 튜닝한다. 카메라가 잠깐만 켜져 1~2 프레임만
+    잡힌 경우를 '데이터 부족'으로 눌러, 표본이 빈약한데 자신만만한 점수가 나오지 않게 한다.
+    """
+    return max(1, settings.interview_min_expression_frames)
 
 # 결과 표정 모달에서 이벤트 1건당 깎는 '주의 집중' 점수(0 하한).
 _EVENT_ATTENTION_PENALTY = 5
@@ -49,15 +59,18 @@ class NonverbalMetrics:
 
     @property
     def has_data(self) -> bool:
-        """실제로 집계할 얼굴 신호가 있었는지.
+        """점수를 낼 만큼 실제 얼굴 신호가 충분히 쌓였는지.
 
-        frame_count(수신 수)가 아니라 detected_frames(얼굴이 잡힌 프레임)로 판정한다 —
-        카메라 가림·미검출로 전 필드 None 인 빈 프레임만 오면 프레임 수는 많아도 신호는 0
-        이므로 False. 그래야 to_modal_feedback 이 빈 모달로 정직하게 비우고, 시선이탈 0%·
-        흔들림 0 을 '완벽'으로 오해해 표정 점수를 가짜로(→만점) 채우지 않는다. 이벤트는
-        그 자체로 실신호라 있으면 True.
+        frame_count(수신 수)가 아니라 detected_frames(얼굴이 잡힌 프레임)를 최소 표본
+        기준(_min_expression_frames)과 비교한다. 카메라 가림·미검출로 전 필드 None 인
+        빈 프레임만 오면 신호가 0 이라 False. 잠깐 켜져 1~2 프레임만 잡힌 경우도 기준
+        미만이면 False — 그래야 to_modal_feedback 이 빈 모달로 정직하게 비우고, 시선이탈
+        0%·흔들림 0(또는 표본 1개)을 '완벽'으로 오해해 점수를 가짜로 채우지 않는다.
+
+        이벤트만 있고 얼굴 프레임이 없으면 시선·자세를 낼 근거가 없어(빈 표본은 만점으로
+        오해될 뿐) 데이터로 보지 않는다 — 이벤트는 프레임이 충분할 때 주의집중 지표로만 얹는다.
         """
-        return self.detected_frames > 0 or bool(self.event_counts)
+        return self.detected_frames >= _min_expression_frames()
 
 
 def aggregate(
