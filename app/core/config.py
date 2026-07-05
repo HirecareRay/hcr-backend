@@ -45,6 +45,16 @@ class Settings(BaseSettings):
     # LLM·STT 연동 — 시크릿은 .env 에서만 채운다(코드·example 에 박지 않음)
     openai_api_key: str = ""
 
+    # TTS(면접관 음성) — ElevenLabs 백엔드 중계. 키는 .env 에서만 채운다(코드·example
+    # 에 박지 않음). interview_tts_enabled 가 false(기본)면 엔드포인트를 비활성화해
+    # 프론트 브라우저 SpeechSynthesis(무료)로 폴백한다 — 켜야 과금 경로가 열린다.
+    # 모델은 저지연·저가 flash 로 고정(바꾸면 지연·비용 변동). 한 요청 텍스트 상한으로
+    # 거대 입력 과금을 막는다.
+    elevenlabs_api_key: str = ""
+    interview_tts_enabled: bool = False
+    elevenlabs_model: str = "eleven_flash_v2_5"
+    interview_tts_max_chars: int = Field(600, ge=1, le=5000)
+
     # 면접 — 한 세션에서 LLM 이 생성할 메인 질문 수(꼬리질문은 별도). 비용·길이 상한.
     # 0·음수면 첫 질문 송신이 깨지고, 과도하면 토큰 비용이 급증하므로 1~10 으로 제한한다.
     interview_main_question_count: int = Field(4, ge=1, le=10)

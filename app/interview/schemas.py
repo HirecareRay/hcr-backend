@@ -197,3 +197,15 @@ class WsTicketOut(CamelModel):
 
     ticket: str
     expires_in: int  # → JSON: "expiresIn" (초)
+
+
+class TtsRequest(CamelModel):
+    """POST /interviews/tts 요청 — 면접관 질문 텍스트를 음성으로 합성한다.
+
+    CamelModel 을 상속해 프론트가 보내는 camelCase(personaId)와 snake(persona_id)를
+    모두 받는다. text 는 질문 한 문장이라 길이를 제한한다(거대 입력 과금 차단).
+    persona_id 는 어떤 면접관 목소리로 읽을지 정한다 — 알 수 없으면 진행자로 폴백한다.
+    """
+
+    text: str = Field(min_length=1, max_length=5000)
+    persona_id: str = ''

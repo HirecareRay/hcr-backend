@@ -17,6 +17,9 @@ email-validator   # Pydantic EmailStr 검증
 # STT(실시간 전사) — OpenAI Whisper/gpt-4o-mini-transcribe
 openai
 
+# TTS(면접관 음성) — ElevenLabs REST 중계용 비동기 HTTP 클라이언트
+httpx
+
 # 머신러닝 및 임베딩 모델
 torch
 sentence-transformers
