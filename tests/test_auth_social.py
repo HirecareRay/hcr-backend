@@ -33,6 +33,17 @@ def _configure_auth(monkeypatch):
     monkeypatch.setattr(
         settings, "kakao_redirect_uri", "http://localhost:3000/api/auth/callback/kakao"
     )
+    # 구글·네이버는 '미설정'을 가정하는 테스트가 있다. 로컬 .env 에 실제 값이 있어도
+    # 테스트가 흔들리지 않게 명시적으로 비운다(env 오염 격리).
+    for field in (
+        "google_client_id",
+        "google_client_secret",
+        "google_redirect_uri",
+        "naver_client_id",
+        "naver_client_secret",
+        "naver_redirect_uri",
+    ):
+        monkeypatch.setattr(settings, field, "")
 
 
 @pytest.fixture
@@ -97,6 +108,27 @@ def test_social_login_reuses_existing_user(client, monkeypatch):
     second = client.post("/auth/social/kakao", json={"code": "code2"})
     assert first.status_code == 200 and second.status_code == 200
     # 같은 소셜 식별자면 새로 만들지 않고 동일 유저를 돌려준다(id 동일).
+    assert first.json()["user"]["id"] == second.json()["user"]["id"]
+
+
+def test_kakao_login_without_email_creates_user_with_placeholder(client, monkeypatch):
+    # 카카오 이메일 미동의(email=None)여도 provider_id 로 신규 가입되고 placeholder 로 채운다.
+    _mock_profile(monkeypatch, OAuthProfile("kakao", "333", None, "카카오사용자"))
+    res = client.post("/auth/social/kakao", json={"code": "authcode"})
+    assert res.status_code == 200
+    body = res.json()
+    assert body["token"]
+    assert body["user"]["name"] == "카카오사용자"
+    # 계약(email 문자열)을 깨지 않게 placeholder 로 채운다.
+    assert body["user"]["email"] == "kakao_333@hcr.local"
+
+
+def test_kakao_login_without_email_reuses_existing_user(client, monkeypatch):
+    # 이메일 없는 카카오도 재로그인 시 같은 유저(id 동일)로 조회된다.
+    _mock_profile(monkeypatch, OAuthProfile("kakao", "333", None, "카카오사용자"))
+    first = client.post("/auth/social/kakao", json={"code": "code1"})
+    second = client.post("/auth/social/kakao", json={"code": "code2"})
+    assert first.status_code == 200 and second.status_code == 200
     assert first.json()["user"]["id"] == second.json()["user"]["id"]
 
 

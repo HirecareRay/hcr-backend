@@ -22,11 +22,16 @@ _TIMEOUT = httpx.Timeout(10.0)
 
 @dataclass(frozen=True)
 class OAuthProfile:
-    """provider 무관하게 통일된 최소 프로필. service 의 find-or-create 입력."""
+    """provider 무관하게 통일된 최소 프로필. service 의 find-or-create 입력.
+
+    email 은 Optional — 카카오는 비즈니스 검수 전이라 이메일 동의항목이 '권한 없음'
+    이면 이메일을 아예 내려주지 않는다. 그때는 email=None 으로 두고, 식별은
+    (provider, provider_id) 조합으로만 한다. 구글·네이버는 항상 이메일이 온다.
+    """
 
     provider: str
     provider_id: str
-    email: str
+    email: str | None
     name: str
 
 
@@ -125,11 +130,13 @@ def _fetch_kakao(config: OAuthProviderConfig, code: str) -> OAuthProfile:
     if provider_id is None:
         raise OAuthError("kakao 프로필 id 가 없습니다")
     account = profile.get("kakao_account") or {}
-    email = account.get("email")
-    if not email:
-        raise OAuthProfileIncomplete("kakao 이메일 제공에 동의해야 로그인할 수 있습니다")
-    name = (account.get("profile") or {}).get("nickname") or ""
-    return OAuthProfile("kakao", str(provider_id), email, _fallback_name(name, email))
+    # 이유: 카카오 이메일 동의항목이 비즈니스 검수 전이라 '권한 없음'이면 이메일이
+    #       아예 안 온다. 이메일을 필수로 막지 않고 Optional 로 둔다(있으면 쓰고 없으면
+    #       None). 식별은 provider_id 로만 하므로 이메일 없이도 로그인이 가능하다.
+    email = account.get("email") or None
+    # 표시 이름은 카카오 닉네임, 없으면 "카카오사용자"로 폴백(email 로컬파트에 의존 안 함).
+    name = (account.get("profile") or {}).get("nickname") or "카카오사용자"
+    return OAuthProfile("kakao", str(provider_id), email, name)
 
 
 def _fetch_google(config: OAuthProviderConfig, code: str) -> OAuthProfile:
