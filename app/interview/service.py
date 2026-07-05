@@ -13,7 +13,8 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Literal
 
-from app.interview import context, dummy_transcript, llm, nonverbal, stt
+from app.core.config import resolve_persona_voice, settings
+from app.interview import context, dummy_transcript, llm, nonverbal, stt, tts
 from app.interview.nonverbal import NonverbalMetrics
 from app.interview.personas import Persona, assign_interviewers
 from app.interview.result_schemas import ImprovementItem, InterviewResult
@@ -166,6 +167,25 @@ def question_event(
         is_last=is_last,
         **persona_fields,
     )
+
+
+async def warm_question_audio(text: str, persona_id: str) -> None:
+    """질문 음성을 미리 합성해 tts 캐시에 채운다(프론트 POST /tts 가 즉시 히트하도록).
+
+    면접관 음성이 텍스트보다 늦게 나오는 지연을 없애기 위해, 질문을 화면에 띄우기 전에
+    같은 (text, 담당 목소리)로 미리 합성해 둔다. 프론트가 보낼 값과 동일하게 부르므로
+    (question_event 가 tts_text=text 로 맞춤) 이후 POST /tts 는 재합성 없이 캐시를 돌려받는다.
+
+    fire-and-forget 안전 — TTS 비활성이면 no-op(크레딧 0), 예외는 전부 삼켜 로그만 남긴다.
+    선합성 실패가 면접 흐름을 절대 막지 않는다(실패 시 프론트가 POST /tts 로 현행 폴백).
+    """
+    if not settings.interview_tts_enabled:
+        return
+    try:
+        voice = resolve_persona_voice(persona_id)
+        await tts.synthesize(text, voice.voice_id, voice.as_voice_settings())
+    except Exception as error:  # noqa: BLE001 — 선합성은 절대 면접 흐름을 막지 않는다
+        logger.warning('질문 음성 선합성 실패(무시) — %s', type(error).__name__)
 
 
 async def transcribe_answer(audio: bytes) -> TranscriptDeltaEvent | None:
