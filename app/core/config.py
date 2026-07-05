@@ -4,8 +4,48 @@
 않고, .env.example만 공유한다. 새 환경변수가 생기면 여기에 필드를 추가한다.
 """
 
-from pydantic import AliasChoices, Field
+from pydantic import AliasChoices, BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class PersonaVoice(BaseModel):
+    """한 면접관 페르소나의 ElevenLabs 목소리·발화 설정.
+
+    voice_id 와 voice_settings 를 코드가 아니라 설정에서 읽어, 코드 수정 없이
+    .env(INTERVIEW_TTS_VOICES JSON)로 목소리·속도를 튜닝할 수 있게 한다.
+    speed 는 0.7~1.2(1.0=기본, 낮을수록 느림), 나머지 값은 0~1 범위.
+    """
+
+    voice_id: str
+    stability: float = Field(0.5, ge=0.0, le=1.0)
+    similarity_boost: float = Field(0.75, ge=0.0, le=1.0)
+    style: float = Field(0.0, ge=0.0, le=1.0)
+    use_speaker_boost: bool = True
+    speed: float = Field(0.88, ge=0.7, le=1.2)
+
+    def as_voice_settings(self) -> dict[str, float | bool]:
+        """ElevenLabs API payload 의 voice_settings 로 직렬화(snake_case 그대로 전송)."""
+        return {
+            "stability": self.stability,
+            "similarity_boost": self.similarity_boost,
+            "style": self.style,
+            "use_speaker_boost": self.use_speaker_boost,
+            "speed": self.speed,
+        }
+
+
+# 면접관 3인의 기본 목소리 — 코드 기본값이며, .env INTERVIEW_TTS_VOICES(JSON)로 통째
+# override 할 수 있다(코드 수정 없이 튜닝). 남성은 tech_pressure 1명, 나머지는 여성.
+# 다국어 모델(eleven_flash_v2_5)이라 한국어도 이 id 로 발화된다. speed=0.88 로 기본
+# 보다 느리게 발화한다(voice_id 는 비밀값이 아니라 코드에 두어도 안전 — 시크릿은 API 키뿐).
+DEFAULT_TTS_VOICES: dict[str, PersonaVoice] = {
+    # 인사담당자 — 따뜻·친근한 여성(Sarah).
+    "culture_fit": PersonaVoice(voice_id="EXAVITQu4vr4xnSDxMaL"),
+    # 기술담당자 — 낮고 단단한 한국어 남성(Midnight Cave). 패널 유일 남성, 압박감 톤.
+    "tech_pressure": PersonaVoice(voice_id="aQzFKIjVemqRAhfd9est"),
+    # 실무담당자 — 차분·중립적인 한국어 여성(Hanna).
+    "practical": PersonaVoice(voice_id="zgDzx5jLLCqEp6Fl7Kl7"),
+}
 
 
 class Settings(BaseSettings):
@@ -54,6 +94,19 @@ class Settings(BaseSettings):
     interview_tts_enabled: bool = False
     elevenlabs_model: str = "eleven_flash_v2_5"
     interview_tts_max_chars: int = Field(600, ge=1, le=5000)
+    # 페르소나별 목소리·발화 설정 — 코드 기본값(DEFAULT_TTS_VOICES)을 쓰되, .env 의
+    # INTERVIEW_TTS_VOICES 에 JSON 을 넣으면 통째로 override 된다(코드 수정 없이 튜닝).
+    # 예: INTERVIEW_TTS_VOICES='{"tech_pressure":{"voice_id":"...","speed":0.9}}'
+    interview_tts_voices: dict[str, PersonaVoice] = Field(
+        default_factory=lambda: dict(DEFAULT_TTS_VOICES)
+    )
+    # 볼륨 정규화 — ElevenLabs 는 목소리마다 원본 음량이 달라(voice_settings 에 gain 없음)
+    # 담당별 크기가 제각각이다. 합성 후 ffmpeg loudnorm 으로 목표 음량에 맞춰 균일화한다.
+    # ⚠️ 배포 서버에 ffmpeg 이 있어야 동작하며, 없거나 실패하면 원본을 그대로 반환한다
+    # (정규화는 부가기능 — 음성 자체를 막지 않는다). target_lufs 는 EBU R128 목표 음량
+    # (낮을수록 조용, 방송 기준 -16 근처 권장, -30~-9 로 제한).
+    interview_tts_normalize: bool = True
+    interview_tts_target_lufs: float = Field(-16.0, ge=-30.0, le=-9.0)
 
     # 면접 — 한 세션에서 LLM 이 생성할 메인 질문 수(꼬리질문은 별도). 비용·길이 상한.
     # 0·음수면 첫 질문 송신이 깨지고, 과도하면 토큰 비용이 급증하므로 1~10 으로 제한한다.
@@ -112,3 +165,19 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
 settings = Settings()
+
+
+def resolve_persona_voice(persona_id: str) -> PersonaVoice:
+    """persona_id 에 맞는 목소리 설정을 돌려준다(모르면 진행자 culture_fit 로 폴백).
+
+    빈 문자열·미지의 id 는 진행자(culture_fit)로 폴백한다(TTS 계약). env(JSON)로 일부
+    페르소나만 넣으면 나머지는 코드 기본값(DEFAULT_TTS_VOICES)으로 폴백한다 — pydantic
+    은 dict 를 병합하지 않고 통째 교체하므로, 개별 페르소나 단위로 기본값을 보충한다.
+    """
+    voices = settings.interview_tts_voices
+    return (
+        voices.get(persona_id)
+        or DEFAULT_TTS_VOICES.get(persona_id)
+        or voices.get("culture_fit")
+        or DEFAULT_TTS_VOICES["culture_fit"]
+    )
