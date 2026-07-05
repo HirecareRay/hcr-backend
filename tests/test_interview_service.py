@@ -9,7 +9,8 @@ import asyncio
 from collections.abc import AsyncIterator
 from unittest.mock import AsyncMock, Mock
 
-from app.interview import context, llm, nonverbal, result_builder, service, stt
+from app.core.config import resolve_persona_voice, settings
+from app.interview import context, llm, nonverbal, result_builder, service, stt, tts
 from app.interview.personas import CULTURE, PRACTICAL, TECH
 from app.interview.result_schemas import ResultMeta
 from app.interview.schemas import LandmarkFrameMessage
@@ -379,3 +380,63 @@ def test_format_history_marks_unanswered_turns():
     text = service.format_history(history)
     assert 'A1: (무응답)' in text
     assert 'A2: 실제 답변' in text
+
+
+# ── warm_question_audio (TTS 선합성) ──────────────────────────────
+# 질문 음성을 프론트의 POST /tts 전에 미리 합성해 캐시에 채운다 → 그 요청이 즉시 히트.
+# tts._post 를 mock 해 실 ElevenLabs·크레딧을 쓰지 않는다(정규화도 꺼 결정적).
+
+
+def test_warm_question_audio_fills_cache(monkeypatch):
+    """선합성하면 같은 (text, persona) 로 뒤이은 synthesize 가 재합성 없이 캐시 히트한다."""
+    tts._cache.clear()
+    monkeypatch.setattr(settings, 'interview_tts_enabled', True)
+    monkeypatch.setattr(settings, 'elevenlabs_api_key', 'k')
+    monkeypatch.setattr(settings, 'interview_tts_normalize', False)  # ffmpeg 없이 결정적
+    calls = 0
+
+    async def _post(text, voice_id, voice_settings=None):
+        nonlocal calls
+        calls += 1
+        return b'audio-bytes'
+
+    monkeypatch.setattr(tts, '_post', _post)
+    # 선합성(라우터가 질문 전송 전/중에 하는 것)
+    asyncio.run(service.warm_question_audio('자기소개 부탁드립니다', 'tech_pressure'))
+    assert calls == 1
+    # 프론트 POST /tts 가 하는 것과 동일한 경로 — 같은 담당 목소리로 재요청
+    voice = resolve_persona_voice('tech_pressure')
+    out = asyncio.run(
+        tts.synthesize('자기소개 부탁드립니다', voice.voice_id, voice.as_voice_settings())
+    )
+    assert out == b'audio-bytes'
+    assert calls == 1  # 재합성 없이 캐시 히트
+
+
+def test_warm_question_audio_noop_when_disabled(monkeypatch):
+    """TTS 비활성이면 합성하지 않는다(빌린 크레딧 과금 0)."""
+    tts._cache.clear()
+    monkeypatch.setattr(settings, 'interview_tts_enabled', False)
+    called = False
+
+    async def _post(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        return b'x'
+
+    monkeypatch.setattr(tts, '_post', _post)
+    asyncio.run(service.warm_question_audio('질문', 'tech_pressure'))
+    assert called is False
+
+
+def test_warm_question_audio_swallows_errors(monkeypatch):
+    """합성이 실패해도 예외를 삼켜 면접 흐름을 막지 않는다(fire-and-forget 안전)."""
+    monkeypatch.setattr(settings, 'interview_tts_enabled', True)
+    monkeypatch.setattr(settings, 'elevenlabs_api_key', 'k')
+
+    async def _boom(*_args, **_kwargs):
+        raise RuntimeError('합성 실패')
+
+    monkeypatch.setattr(tts, 'synthesize', _boom)
+    # 예외가 밖으로 새지 않으면 통과(None 반환)
+    assert asyncio.run(service.warm_question_audio('질문', 'tech_pressure')) is None

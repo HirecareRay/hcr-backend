@@ -852,3 +852,51 @@ def test_ws_connect_generates_requested_question_count(monkeypatch):
         ws.receive_json()  # 첫 질문(m0)
 
     assert captured['count'] == 3
+
+
+# ── TTS 선합성(음성-텍스트 싱크) ──────────────────────────────────
+# 면접관 음성이 텍스트보다 늦게 나오는 지연을 없애기 위해, 질문을 내리기 전(첫·꼬리)
+# 또는 이전 질문 답변 중(다음 메인)에 음성을 미리 합성해 캐시에 채운다. service.warm_
+# question_audio 를 스파이로 대체해 "어느 시점에 어떤 텍스트를 선합성하는가"만 검증한다
+# (실 합성·크레딧은 service 단위 테스트가 담당).
+
+
+def test_ws_presynthesizes_first_question_before_send(monkeypatch):
+    """첫 질문(m0)은 텍스트를 내리기 전에 그 텍스트로 음성을 미리 합성한다(블로킹 싱크)."""
+    _patch_llm(monkeypatch, main_questions=['자기소개를 부탁드립니다', '강점은?'])
+    warmed: list[tuple[str, str]] = []
+
+    async def _spy(text, persona_id):
+        warmed.append((text, persona_id))
+
+    monkeypatch.setattr(service, 'warm_question_audio', _spy)
+
+    with client.websocket_connect(_ws_url()) as ws:
+        data = ws.receive_json()
+
+    assert data['questionId'] == 'm0'
+    # m0 을 받은 시점엔 이미 그 텍스트가 담당(인사담당자) 목소리로 선합성돼 있어야 한다.
+    assert ('자기소개를 부탁드립니다', 'culture_fit') in warmed
+
+
+def test_ws_prefetches_next_main_during_current_answer(monkeypatch):
+    """다음 메인(m1)은 블로킹 없이 보내지만, 직전에 백그라운드로 미리 합성돼 있다.
+
+    next-main 전송 경로는 블로킹 선합성을 하지 않으므로(없던 텀 방지), m1 텍스트가
+    선합성됐다면 그것은 오직 예열 경로(_prefetch_main)를 통해서다 → 예열 동작 증명.
+    """
+    _patch_llm(monkeypatch, main_questions=['자기소개를 부탁드립니다', '강점은?'])
+    warmed: list[tuple[str, str]] = []
+
+    async def _spy(text, persona_id):
+        warmed.append((text, persona_id))
+
+    monkeypatch.setattr(service, 'warm_question_audio', _spy)
+
+    with client.websocket_connect(_ws_url()) as ws:
+        assert ws.receive_json()['questionId'] == 'm0'
+        ws.send_json({'type': 'control', 'action': 'answer_end'})  # 빈 답변 → 꼬리 생략
+        ws.send_json({'type': 'control', 'action': 'next'})
+        assert ws.receive_json()['questionId'] == 'm1'
+
+    assert '강점은?' in [text for text, _ in warmed]

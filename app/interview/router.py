@@ -15,6 +15,7 @@ control 메시지로 전이한다 —
 service.py 가 한다.
 """
 
+import asyncio
 import logging
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
@@ -36,6 +37,7 @@ from app.interview.schemas import (
     ControlMessage,
     EventSnapshotMessage,
     LandmarkFrameMessage,
+    QuestionEvent,
     TextAnswerMessage,
     TtsRequest,
     UpstreamMessage,
@@ -77,6 +79,12 @@ _MAX_ANSWER_CHARS = 5000
 # 메모리·자막 무한 증가 + 부분 자막이 매번 전체 버퍼를 재전사해 답변 길이에 제곱으로
 # 비싸지는 걸 부른다. 텍스트의 _MAX_ANSWER_CHARS 절단과 같은 취지(면접 안 끊고 길이만 캡).
 _MAX_AUDIO_CHUNKS = 1200  # ~5분 @ 250ms timeslice
+# 질문 전송 전 음성 선합성 블로킹 상한(초). 이 안에 못 끝나면 텍스트를 먼저 보내
+# 면접을 막지 않는다(프론트가 POST /tts 로 폴백). 정상 합성(~1s)은 넉넉히 든다.
+_TTS_PRESYNTH_TIMEOUT = 5.0
+# 백그라운드 선합성(다음 메인 예열) 태스크 참조 보관 — asyncio 가 실행 중 태스크를
+# GC 하지 못하게 잡아두고, 끝나면 콜백으로 스스로 빠진다.
+_prefetch_tasks: set[asyncio.Task[None]] = set()
 
 
 @dataclass(frozen=True)
@@ -146,6 +154,42 @@ def _persona_at(session: _WsSession, index: int) -> Persona:
     if 0 <= index < len(session.personas):
         return session.personas[index]
     return CULTURE
+
+
+async def _send_question(websocket: WebSocket, event: QuestionEvent) -> None:
+    """질문 이벤트를 보내기 직전에 음성을 미리 합성해(캐시 채움) 텍스트-음성 싱크를 맞춘다.
+
+    면접관 음성이 텍스트보다 늦게 나오는 지연을 없애기 위해, 텍스트를 내리기 전에 같은
+    (text, 담당 목소리)로 미리 합성한다 — 이후 프론트 POST /tts 는 재합성 없이 캐시를
+    돌려받아 텍스트와 함께 재생된다. 첫 질문·꼬리질문은 이미 있는 생성 텀 안에서 처리된다.
+
+    합성이 느리거나(_TTS_PRESYNTH_TIMEOUT 초과) 실패해도 그냥 텍스트를 전송해 면접을
+    막지 않는다 — 이 경우 프론트가 POST /tts 로 현행 폴백(절대 더 나빠지지 않음).
+    """
+    try:
+        await asyncio.wait_for(
+            service.warm_question_audio(event.tts_text or event.text, event.persona_id),
+            timeout=_TTS_PRESYNTH_TIMEOUT,
+        )
+    except Exception:  # noqa: BLE001 — 선합성 지연·실패가 질문 전송을 막지 않는다
+        logger.warning('질문 음성 선합성 지연·실패 — 텍스트 먼저 전송')
+    await _send(websocket, event)
+
+
+def _prefetch_main(session: _WsSession, index: int) -> None:
+    """index 슬롯 메인 질문 음성을 백그라운드로 미리 합성한다(다음 메인 예열 → 텀 0).
+
+    메인 질문은 접속 시 모두 생성돼 있으므로, 사용자가 현재 질문에 답하는 동안 다음
+    메인을 미리 합성해 두면 그 질문은 새 지연 없이 텍스트와 함께 음성이 나온다. 범위
+    밖이면 no-op. fire-and-forget 이라 실패는 warm_question_audio 가 삼킨다.
+    """
+    if not 0 <= index < len(session.main_questions):
+        return
+    text = session.main_questions[index]
+    persona_id = _persona_at(session, index).id
+    task = asyncio.create_task(service.warm_question_audio(text, persona_id))
+    _prefetch_tasks.add(task)
+    task.add_done_callback(_prefetch_tasks.discard)
 
 
 @router.post(
@@ -425,12 +469,14 @@ async def interview_ws(websocket: WebSocket, session_id: str) -> None:
     )
     # 질문이 1개뿐이면 첫 질문 m0 가 곧 마지막이다(is_last).
     is_last = len(questions) == 1
-    await _send(
+    await _send_question(
         websocket,
         service.question_event(
             'm0', first, is_last=is_last, persona=_persona_at(session, 0)
         ),
     )
+    # 사용자가 m0 에 답하는 동안 다음 메인(m1)을 미리 합성해 둔다(그 질문은 텀 0).
+    _prefetch_main(session, 1)
 
     try:
         while True:
@@ -657,7 +703,7 @@ async def _try_follow_up(
     text = await service.generate_follow_up(last.question, last.answer, persona)
     if not text:
         return None
-    await _send(
+    await _send_question(
         websocket,
         service.question_event(
             f'f{session.main_index}', text, kind='follow_up', persona=persona
@@ -676,6 +722,8 @@ async def _next_main_or_summary(
         # 이 다음 메인이 마지막이면 is_last 로 실어 보낸다 — 이후 꼬리질문은 (a) 규칙상
         # 안 붙으므로, 이 답변의 next 가 곧장 요약으로 이어진다.
         is_last = next_index == len(session.main_questions) - 1
+        # 이 메인은 직전 질문 전송 때 이미 예열돼 있어 즉시 전송해도 캐시 히트한다
+        # (블로킹하면 없던 텀이 생기므로 _send 그대로). 곧이어 그다음 메인을 예열한다.
         await _send(
             websocket,
             service.question_event(
@@ -685,6 +733,7 @@ async def _next_main_or_summary(
                 persona=_persona_at(session, next_index),
             ),
         )
+        _prefetch_main(session, next_index + 1)
         return replace(
             session,
             main_index=next_index,
