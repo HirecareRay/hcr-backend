@@ -1,0 +1,29 @@
+name: Deploy to EC2
+
+# main은 develop에서만 merge되는 배포 브랜치 — main에 push(=merge)될 때마다 자동 배포.
+# 수동 재배포가 필요하면 Actions 탭에서 workflow_dispatch로 직접 실행 가능.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      # 지금까지 수동으로 하던 것과 동일한 절차를 SSH로 그대로 실행한다:
+      # docker compose down → git pull → docker compose up -d --build
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            set -e
+            cd /developers/backend
+            docker compose down
+            cd /developers/backend/hcr-backend
+            git pull origin main
+            cd /developers/backend
+            docker compose up -d --build
