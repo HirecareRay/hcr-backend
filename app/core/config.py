@@ -65,6 +65,13 @@ class Settings(BaseSettings):
     # 비용↑. 프론트 MediaRecorder timeslice 에 맞춰 튜닝한다. 1~50 으로 제한.
     interview_partial_transcript_every: int = Field(8, ge=1, le=50)
 
+    # 면접 결과 비언어·음성 모달의 최소 표본 — 이만큼 실제 신호가 쌓여야 점수를 낸다.
+    # 카메라·마이크가 잠깐만 켜져 1~2 프레임만 잡힌 경우를 '데이터 부족(빈 모달)'으로
+    # 처리해, 근거 없는 자신만만한 점수(예: 1프레임으로 시선 만점)를 막는다. 0 이면
+    # 사실상 비활성(1개만 있어도 점수 — 하한 1). 표정은 ~1s 주기라 5≈5초, 음성 3≈3초.
+    interview_min_expression_frames: int = Field(5, ge=0, le=100)
+    interview_min_voice_frames: int = Field(3, ge=0, le=100)
+
     # 면접 WS 입장 티켓 TTL(초) — 브라우저 WS 는 헤더를 못 붙이므로 JWT 대신 단기·
     # 1회용 티켓을 쿼리로 받는다. 짧을수록 URL 노출 위험이 줄지만 너무 짧으면 발급↔
     # 연결 사이 지연에 걸린다. 10~300 으로 제한(기본 60).
