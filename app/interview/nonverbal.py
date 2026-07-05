@@ -28,12 +28,15 @@ def _min_expression_frames() -> int:
     """
     return max(1, settings.interview_min_expression_frames)
 
-# 결과 표정 모달에서 이벤트 1건당 깎는 '주의 집중' 점수(0 하한).
+# 결과 표정 모달에서 이벤트 1건당 깎는 '주의 집중' 점수(0 하한). 외부 표준 없는 휴리스틱(튜닝 대상).
 _EVENT_ATTENTION_PENALTY = 5
 
 # 시선이 화면 중앙에서 이 값을 넘게 벗어나면 "이탈"로 본다(정규화 좌표, 0=중앙).
+# 0.3(중앙 기준 30% 벗어남) 자체는 외부 표준 없는 기하학적 휴리스틱(튜닝 대상).
+# 단 "이탈이 좀 있어도 정상"이라는 관용도의 근거는 있다: 발화자의 정상 아이컨택은
+# 약 60~70%(Quantified Impressions)라, 이탈 30~40%까지는 감점이 과하지 않다.
 GAZE_OFF_THRESHOLD = 0.3
-# 고개흔들림 표준편차(deg)를 0~1 로 정규화할 때의 기준치.
+# 고개흔들림 표준편차(deg)를 0~1 로 정규화할 때의 기준치. 외부 표준 없는 휴리스틱(튜닝 대상).
 HEAD_MOVEMENT_SCALE = 30.0
 # describe 가 "높음/큼"으로 표현할 비율·움직임 임계(피드백 문구용 — 좌표 임계와 무관).
 _FEEDBACK_GAZE_RATIO = 0.3

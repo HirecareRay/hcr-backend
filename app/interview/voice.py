@@ -24,11 +24,15 @@ from app.interview.schemas import VoiceMetricMessage
 _SIGNAL_FIELDS = ('decibel', 'pitch', 'speech_rate', 'tremor')
 
 # 면접 발화의 적정 말속도 구간(WPM). 이 안이면 만점, 벗어날수록 선형 감점.
+# 근거: 발표·스피치 권장 속도 — Toastmasters 120~160 WPM, 일반 프레젠테이션
+# 120~150 WPM(virtualspeech). 하한 100 은 기술·심화 설명(100~130)까지 감안한 여유값.
+# ⚠️ 영어권 WPM 기준을 차용한 것 — 한국어는 어절·음절 밀도가 달라 음절/분(spm)으로
+# 재보정이 필요하다(계약상 클라가 WPM 으로 보냄. 추후 한국어 캘리브레이션 대상).
 SPEECH_RATE_MIN = 100.0
-SPEECH_RATE_MAX = 150.0
-# 적정 구간을 이만큼(WPM) 벗어나면 0 점(너무 느림/빠름).
+SPEECH_RATE_MAX = 160.0
+# 적정 구간을 이만큼(WPM) 벗어나면 0 점(너무 느림/빠름). 외부 표준 없는 휴리스틱(튜닝 대상).
 SPEECH_RATE_TOLERANCE = 60.0
-# 피치 표준편차(Hz)를 0~1 불안정도로 정규화하는 기준치.
+# 피치 표준편차(Hz)를 0~1 불안정도로 정규화하는 기준치. 외부 표준 없는 휴리스틱(튜닝 대상).
 PITCH_STD_SCALE = 60.0
 
 
