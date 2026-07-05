@@ -458,7 +458,7 @@ async def analyze_fit(
 
 
 def list_fit_history(mongo: Database, user_id: str) -> list[dict]:
-    """그 유저의 적합도 분석 기록을 최신순 카드 목록으로 요약한다(유저분석 탭).
+    """그 유저의 적합도 분석 기록을 최신순 카드 목록으로 요약한다(적합도 분석 탭).
 
     fit_analyses 저장 시점의 완성품에서 카드에 필요한 필드만 뽑는다 — LLM 재호출 0.
     """
@@ -467,11 +467,16 @@ def list_fit_history(mongo: Database, user_id: str) -> list[dict]:
         {
             "company_id": 1, "company_name": 1,
             "job_posting_id": 1, "job_title": 1, "job_names": 1,
-            "analyzed_at": 1,
+            "analyzed_at": 1, "category_summary": 1,
         },
     ).sort("analyzed_at", -1)
-    return [
-        {
+    result = []
+    for d in docs:
+        # 저장된 category_summary로 종합 매칭률(%)을 계산 — LLM 재호출도, 별도 조회도 없다.
+        summary = d.get("category_summary") or []
+        total = sum(s.get("total", 0) for s in summary)
+        matched = sum(s.get("matched", 0) for s in summary)
+        result.append({
             "analysis_id": str(d["_id"]),
             "company_id": d.get("company_id"),
             "company_name": d.get("company_name"),
@@ -479,6 +484,6 @@ def list_fit_history(mongo: Database, user_id: str) -> list[dict]:
             "job_title": d.get("job_title"),
             "job_names": d.get("job_names") or [],
             "analyzed_at": d.get("analyzed_at"),
-        }
-        for d in docs
-    ]
+            "overall_pct": round(matched / total * 100) if total > 0 else None,
+        })
+    return result
