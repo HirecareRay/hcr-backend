@@ -69,3 +69,28 @@ def test_follow_up_messages_carries_persona_role_and_tone():
     assert TECH.role_label in system
     assert TECH.focus in system
     assert 'SKIP' in system  # 부실 답변 스킵 규칙 유지
+
+
+def test_follow_up_messages_default_generate_bias():
+    """꼬리질문 기본값은 '생성' — 애매하면 생성하고, 사실상 빈 답변만 SKIP 한다."""
+    system = prompts.follow_up_messages('직전 질문', '지원자 답변', TECH)[0]['content']
+    assert '애매하면 SKIP 하지 말고 생성' in system
+
+
+def test_report_messages_embeds_scoring_rubric():
+    """결과 리포트 프롬프트에 채점 구간·감점 규칙(루브릭)이 실린다."""
+    system = prompts.report_messages('면접 기록', '백엔드')[0]['content']
+    assert prompts.SCORING_RUBRIC in system
+    assert '무조건 0점' in system  # 무응답 0점 규칙
+
+
+def test_summary_messages_embeds_scoring_rubric():
+    """라이브 요약 프롬프트도 같은 채점 기준을 공유한다(두 경로 점수 일관)."""
+    system = prompts.summary_messages('면접 기록')[0]['content']
+    assert prompts.SCORING_RUBRIC in system
+
+
+def test_evaluation_messages_embeds_scoring_rubric():
+    """스트림 평가 피드백도 같은 채점 잣대로 톤을 맞춘다."""
+    system = prompts.evaluation_messages('질문', '답변')[0]['content']
+    assert prompts.SCORING_RUBRIC in system
