@@ -92,25 +92,34 @@ def login_social(db: Session, provider: str, data: SocialLoginIn) -> AuthRespons
 
 
 def _find_or_create_social_user(db: Session, profile: OAuthProfile) -> User:
-    """소셜 식별자로 기존 유저를 찾고, 없으면 새로 만든다.
+    """소셜 식별자로 기존 유저를 찾고, 없으면 새로 만든다(provider+provider_id upsert).
 
-    이미 같은 이메일이 다른 경로(이메일 가입·다른 provider)로 존재하면 자동 연결하지
-    않고 409 로 막는다(이메일 기반 계정 탈취·중복 생성 방지).
+    식별은 (provider, provider_id) 조합으로만 한다 — 이메일은 카카오처럼 없을 수 있어
+    식별자로 쓰지 않는다. 이미 같은 이메일이 다른 경로(이메일 가입·다른 provider)로
+    존재하면 자동 연결하지 않고 409 로 막는다(이메일 기반 계정 탈취·중복 생성 방지).
     """
     existing = repository.get_user_by_provider(db, profile.provider, profile.provider_id)
     if existing is not None:
         return existing
 
-    if repository.get_user_by_email(db, profile.email) is not None:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="이미 다른 방법으로 가입된 이메일입니다",
-        )
+    # 이유: 카카오는 이메일이 없을 수 있다. 이메일이 있을 때만 이메일 충돌을 검사한다.
+    if profile.email is not None:
+        if repository.get_user_by_email(db, profile.email) is not None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="이미 다른 방법으로 가입된 이메일입니다",
+            )
+        email = profile.email
+    else:
+        # 이유: users.email 은 NOT NULL·UNIQUE 라 이메일이 없는 소셜 유저도 값이 필요하다.
+        #       컬럼을 nullable 로 완화하는 대신 provider_id 로 유일한 placeholder 를 넣어
+        #       마이그레이션 없이 제약을 유지한다(도메인 hcr.local 은 실제 발송 불가 표식).
+        email = f"{profile.provider}_{profile.provider_id}@hcr.local"
 
     return repository.create_social_user(
         db,
         name=profile.name,
-        email=profile.email,
+        email=email,
         provider=profile.provider,
         provider_id=profile.provider_id,
     )
