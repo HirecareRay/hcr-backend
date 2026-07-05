@@ -25,6 +25,17 @@ class LoginIn(BaseModel):
     password: str = Field(min_length=1, max_length=72)
 
 
+class SocialLoginIn(BaseModel):
+    """소셜 로그인 요청 — 프론트 콜백이 provider 인가코드를 넘긴다.
+
+    code: provider 가 콜백으로 준 authorization code.
+    state: CSRF 방어용 값. naver 토큰 교환에는 필수라 함께 받는다(kakao·google 은 무시).
+    """
+
+    code: str = Field(min_length=1, max_length=2048)
+    state: str | None = Field(default=None, max_length=512)
+
+
 class AuthUserOut(CamelModel):
     """응답에 실리는 사용자 정보 (비밀번호 제외)."""
 

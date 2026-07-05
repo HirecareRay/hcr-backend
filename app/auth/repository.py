@@ -27,3 +27,30 @@ def create_user(db: Session, *, name: str, email: str, password_hash: str) -> Us
     db.commit()
     db.refresh(user)
     return user
+
+
+def get_user_by_provider(db: Session, provider: str, provider_id: str) -> User | None:
+    """소셜 식별자(provider, provider_id)로 사용자 1명을 찾는다(없으면 None)."""
+    return db.execute(
+        select(User).where(
+            User.provider == provider,
+            User.provider_id == provider_id,
+        )
+    ).scalar_one_or_none()
+
+
+def create_social_user(
+    db: Session, *, name: str, email: str, provider: str, provider_id: str
+) -> User:
+    """소셜 사용자를 저장하고 커밋한 뒤 반환한다(비밀번호 없음 → password_hash=NULL)."""
+    user = User(
+        name=name,
+        email=email,
+        provider=provider,
+        provider_id=provider_id,
+        password_hash=None,
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return user

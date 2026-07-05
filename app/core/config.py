@@ -4,8 +4,13 @@
 않고, .env.example만 공유한다. 새 환경변수가 생기면 여기에 필드를 추가한다.
 """
 
+from dataclasses import dataclass
+
 from pydantic import AliasChoices, BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# 지원하는 소셜 로그인 provider (이 목록 밖은 라우터에서 거절한다)
+SOCIAL_PROVIDERS: tuple[str, ...] = ("kakao", "google", "naver")
 
 
 class PersonaVoice(BaseModel):
@@ -81,6 +86,21 @@ class Settings(BaseSettings):
     jwt_secret: str = ""               # 토큰 서명 키 (반드시 .env 에 설정)
     jwt_algorithm: str = "HS256"       # 서명 알고리즘
     jwt_expire_minutes: int = 60 * 24  # 액세스 토큰 만료(분) — 기본 1일
+
+    # 소셜 로그인(OAuth) — 카카오·구글·네이버 3종. 각 provider 콘솔에서 발급한
+    # client_id·client_secret 과 프론트 콜백 주소(redirect_uri)를 .env 에서 읽는다.
+    # 시크릿(client_secret)은 코드·example 에 박지 않는다. redirect_uri 는 환경별로
+    # 다르다(로컬=http://localhost:3000/..., 운영=vercel 도메인) — authorization code
+    # 교환 시 프론트가 인가 요청에 쓴 값과 정확히 일치해야 하므로 .env 에서 환경별로 채운다.
+    kakao_client_id: str = ""
+    kakao_client_secret: str = ""
+    kakao_redirect_uri: str = ""
+    google_client_id: str = ""
+    google_client_secret: str = ""
+    google_redirect_uri: str = ""
+    naver_client_id: str = ""
+    naver_client_secret: str = ""
+    naver_redirect_uri: str = ""
 
     # LLM·STT 연동 — 시크릿은 .env 에서만 채운다(코드·example 에 박지 않음)
     openai_api_key: str = ""
@@ -165,6 +185,50 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
 settings = Settings()
+
+
+@dataclass(frozen=True)
+class OAuthProviderConfig:
+    """한 소셜 provider 의 OAuth 자격 증명(불변).
+
+    client_secret 은 시크릿이라 코드에 두지 않고 .env 에서만 읽는다. redirect_uri 는
+    code→token 교환 시 provider 가 인가 요청의 값과 일치하는지 검사하므로 함께 보관한다.
+    """
+
+    client_id: str
+    client_secret: str
+    redirect_uri: str
+
+    @property
+    def is_configured(self) -> bool:
+        """세 값이 모두 채워졌는지 — 하나라도 비면 미설정으로 본다."""
+        return bool(self.client_id and self.client_secret and self.redirect_uri)
+
+
+def resolve_oauth_provider(provider: str) -> OAuthProviderConfig | None:
+    """provider 이름에 맞는 OAuth 설정을 돌려준다(지원 목록 밖이면 None).
+
+    지원 provider 라도 .env 가 비어 있을 수 있으므로, 호출부는 반환값의
+    is_configured 로 미설정(503)을 구분한다.
+    """
+    configs: dict[str, OAuthProviderConfig] = {
+        "kakao": OAuthProviderConfig(
+            settings.kakao_client_id,
+            settings.kakao_client_secret,
+            settings.kakao_redirect_uri,
+        ),
+        "google": OAuthProviderConfig(
+            settings.google_client_id,
+            settings.google_client_secret,
+            settings.google_redirect_uri,
+        ),
+        "naver": OAuthProviderConfig(
+            settings.naver_client_id,
+            settings.naver_client_secret,
+            settings.naver_redirect_uri,
+        ),
+    }
+    return configs.get(provider)
 
 
 def resolve_persona_voice(persona_id: str) -> PersonaVoice:
