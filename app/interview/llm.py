@@ -122,14 +122,6 @@ async def stream_evaluation(question: str, answer: str) -> AsyncIterator[str]:
         raise RuntimeError('답변 평가에 실패했습니다') from error
 
 
-async def generate_summary(transcript: str) -> dict:
-    """면접 기록으로 최종 요약(JSON)을 생성·파싱한다(실패 시 빈 dict)."""
-    text = await _complete(
-        prompts.summary_messages(transcript), temperature=_SCORING_TEMPERATURE
-    )
-    return _parse_summary(text)
-
-
 async def generate_report(transcript: str, job_title: str) -> dict:
     """면접 기록으로 결과 리포트의 LLM 영역(JSON)을 1회 생성·파싱한다(실패 시 빈 dict).
 
@@ -159,9 +151,9 @@ async def generate_report(transcript: str, job_title: str) -> dict:
 
 
 def _parse_summary(text: str) -> dict:
-    """LLM 의 JSON 응답을 안전하게 파싱한다(코드펜스 허용, 실패 시 빈 dict).
+    """LLM 리포트의 JSON 응답을 안전하게 파싱한다(코드펜스 허용, 실패 시 빈 dict).
 
-    빈 dict 를 돌려주면 호출부(service)가 안전 기본 요약으로 우회한다.
+    빈 dict 를 돌려주면 호출부(result_builder)가 안전 기본값으로 우회한다.
     """
     cleaned = text.strip()
     if cleaned.startswith('```'):
@@ -170,6 +162,6 @@ def _parse_summary(text: str) -> dict:
     try:
         data = json.loads(cleaned)
     except (json.JSONDecodeError, TypeError):
-        logger.warning('요약 JSON 파싱 실패: %s', text[:200])
+        logger.warning('리포트 JSON 파싱 실패: %s', text[:200])
         return {}
     return data if isinstance(data, dict) else {}

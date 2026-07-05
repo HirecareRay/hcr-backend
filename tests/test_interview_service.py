@@ -9,9 +9,25 @@ import asyncio
 from collections.abc import AsyncIterator
 from unittest.mock import AsyncMock, Mock
 
-from app.interview import context, llm, nonverbal, service, stt
+from app.interview import context, llm, nonverbal, result_builder, service, stt
 from app.interview.personas import CULTURE, PRACTICAL, TECH
-from app.interview.schemas import EventSnapshotMessage, LandmarkFrameMessage
+from app.interview.result_schemas import ResultMeta
+from app.interview.schemas import LandmarkFrameMessage
+
+
+def _result(report: dict, history=(service.Turn('q', 'a', 'e', 'common'),)):
+    """report dict + 히스토리로 InterviewResult 를 조립한다(summary_from_result 입력용)."""
+    meta = ResultMeta(
+        result_id='r1',
+        company_id='c1',
+        company_name='CJ ENM',
+        job_title='마케팅',
+        conducted_at='2026-06-29T00:00:00+00:00',
+        duration_sec=60,
+        mode='voice',
+        question_count=len(history),
+    )
+    return result_builder.build_result(meta=meta, history=history, report=report)
 
 
 # ── build_main_questions ──────────────────────────────────────────
@@ -261,108 +277,83 @@ def test_transcribe_answer_empty_returns_none(monkeypatch):
     assert asyncio.run(service.transcribe_answer(b'audio')) is None
 
 
-# ── build_summary ─────────────────────────────────────────────────
+# ── summary_from_result (라이브 summary = 결과 리포트에서 파생) ─────────
 
 
-def test_build_summary_maps_llm_fields(monkeypatch):
-    """LLM dict 를 SummaryEvent 로 매핑한다(비언어 미제공 시 점수 가감 없음)."""
-    monkeypatch.setattr(
-        llm,
-        'generate_summary',
-        AsyncMock(
-            return_value={
-                'overall_score': 75,
-                'language_feedback': '논리적입니다',
-                'improvements': ['결론 보강', ''],
-            }
-        ),
+def test_summary_from_result_uses_report_overall_score():
+    """라이브 종합점수는 결과 리포트의 overall.score 를 그대로 쓴다(단일 채점 소스)."""
+    result = _result(
+        {
+            'overall': {'score': 75, 'grade': 'B', 'headline': 'h'},
+            'answer_feedback': {'score': 75, 'summary': '논리적입니다', 'metrics': []},
+            'improvements': [
+                {'area': '결론', 'problem': 'p', 'method': '결론 먼저 제시'},
+            ],
+        }
     )
-    summary = asyncio.run(service.build_summary((service.Turn('q', 'a', 'e'),)))
-    assert summary.overall_score == 75.0  # 비언어 데이터 없음 → 가감 0
-    assert summary.language_feedback == '논리적입니다'
-    assert summary.improvements == ['결론 보강']  # 빈 항목 제거
-    assert summary.nonverbal_feedback  # placeholder 가 아닌 안내 문구
-    assert 'Phase' not in summary.nonverbal_feedback
-
-
-def test_build_summary_applies_nonverbal_penalty(monkeypatch):
-    """비언어 지표(시선이탈)가 있으면 점수를 깎고 피드백에 반영한다."""
-    monkeypatch.setattr(
-        llm,
-        'generate_summary',
-        AsyncMock(return_value={'overall_score': 90, 'language_feedback': '좋음'}),
-    )
-    frames = tuple(
-        LandmarkFrameMessage(gaze_x=0.9) for _ in range(5)
-    )
-    metrics = nonverbal.aggregate(frames, ())
-    summary = asyncio.run(service.build_summary((), metrics))
-    assert summary.overall_score < 90.0  # 시선이탈 감점 반영
-    assert '시선' in summary.nonverbal_feedback
-
-
-def test_build_summary_clamps_score_to_zero(monkeypatch):
-    """비언어 감점이 커도 점수는 0 미만으로 내려가지 않는다."""
-    monkeypatch.setattr(
-        llm,
-        'generate_summary',
-        AsyncMock(return_value={'overall_score': 5, 'language_feedback': 'x'}),
-    )
-    frames = tuple(LandmarkFrameMessage(gaze_x=1.0) for _ in range(10))
-    events = tuple(
-        EventSnapshotMessage(event='gaze_away') for _ in range(50)
-    )
-    metrics = nonverbal.aggregate(frames, events)
-    summary = asyncio.run(service.build_summary((), metrics))
-    assert summary.overall_score == 0.0
-
-
-def test_build_summary_survives_nonverbal_error(monkeypatch):
-    """비언어 환산이 예외를 던져도 요약은 0 가감·안내 문구로 계속 생성된다."""
-    monkeypatch.setattr(
-        llm,
-        'generate_summary',
-        AsyncMock(
-            return_value={'overall_score': 70, 'language_feedback': 'ok', 'improvements': []}
-        ),
-    )
-    monkeypatch.setattr(nonverbal, 'score_penalty', Mock(side_effect=RuntimeError('boom')))
-
-    summary = asyncio.run(service.build_summary((), nonverbal.NonverbalMetrics()))
-
+    summary = service.summary_from_result(result, nonverbal.NonverbalMetrics())
     assert summary.type == 'summary'
-    assert summary.overall_score == 70.0  # 감점 0 으로 우회(요약 안 끊김)
+    assert summary.overall_score == 75.0
+    assert summary.language_feedback == '논리적입니다'
+    assert summary.improvements == ['결론: 결론 먼저 제시']
+    assert summary.nonverbal_feedback  # 안내 문구(빈 값 아님)
+
+
+def test_summary_from_result_improvement_area_only():
+    """method 가 비면 보완점은 area 만으로 한 줄을 만든다(area·method 한쪽만 있는 분기)."""
+    result = _result(
+        {
+            'overall': {'score': 70, 'grade': 'B', 'headline': 'h'},
+            'answer_feedback': {'score': 70, 'summary': 's', 'metrics': []},
+            'improvements': [{'area': '시간 관리', 'problem': 'p', 'method': ''}],
+        }
+    )
+    summary = service.summary_from_result(result, nonverbal.NonverbalMetrics())
+    assert summary.improvements == ['시간 관리']  # method 없으면 area 만
+
+
+def test_summary_from_result_no_nonverbal_penalty_on_score():
+    """비언어(시선이탈)가 있어도 종합점수는 리포트 점수 그대로 — 태도는 문장으로만 얹는다."""
+    result = _result(
+        {
+            'overall': {'score': 90, 'grade': 'A', 'headline': 'h'},
+            'answer_feedback': {'score': 90, 'summary': '좋음', 'metrics': []},
+        }
+    )
+    frames = tuple(LandmarkFrameMessage(gaze_x=0.9) for _ in range(5))
+    metrics = nonverbal.aggregate(frames, ())
+    summary = service.summary_from_result(result, metrics)
+    assert summary.overall_score == 90.0  # 감점 없음(결과 페이지와 일치)
+    assert '시선' in summary.nonverbal_feedback  # 태도는 문장에 반영
+
+
+def test_summary_from_result_empty_report_uses_builder_default_feedback():
+    """빈 리포트(무응답·LLM 실패)면 language_feedback 은 builder 의 정직한 기본 문구다."""
+    result = _result({}, history=(service.Turn('자기소개', '', '', 'common'),))
+    summary = service.summary_from_result(result, nonverbal.NonverbalMetrics())
+    assert summary.language_feedback == '답변 피드백을 생성하지 못했습니다.'
+
+
+def test_summary_from_result_survives_describe_error(monkeypatch):
+    """비언어 문장 생성이 예외를 던져도 요약은 안내 문구로 계속 생성된다."""
+    monkeypatch.setattr(nonverbal, 'describe', Mock(side_effect=RuntimeError('boom')))
+    result = _result(
+        {
+            'overall': {'score': 70, 'grade': 'B', 'headline': 'h'},
+            'answer_feedback': {'score': 70, 'summary': 'ok', 'metrics': []},
+        }
+    )
+    summary = service.summary_from_result(result, nonverbal.NonverbalMetrics())
+    assert summary.overall_score == 70.0  # 리포트 점수 유지(요약 안 끊김)
     assert '오류' in summary.nonverbal_feedback
 
 
-def test_build_summary_falls_back_on_error(monkeypatch):
-    """요약 LLM 장애 시 안전 기본 요약(score 0)을 반환한다."""
-    monkeypatch.setattr(
-        llm, 'generate_summary', AsyncMock(side_effect=RuntimeError('down'))
-    )
-    summary = asyncio.run(service.build_summary(()))
+def test_summary_from_result_zero_when_no_answers():
+    """전부 무응답이면 빈 리포트 → 종합점수 0 으로 정직하게 파생한다."""
+    result = _result({}, history=(service.Turn('자기소개', '', '', 'common'),))
+    summary = service.summary_from_result(result, nonverbal.NonverbalMetrics())
     assert summary.overall_score == 0.0
-    assert summary.language_feedback  # 비어 있지 않은 안내 문구
     assert summary.improvements == []
-
-
-def test_build_summary_coerces_bad_score(monkeypatch):
-    """LLM 이 점수를 문자열로 줘도 float 으로 강제, 파싱 불가면 0.0."""
-    monkeypatch.setattr(
-        llm, 'generate_summary', AsyncMock(return_value={'overall_score': 'N/A'})
-    )
-    summary = asyncio.run(service.build_summary(()))
-    assert summary.overall_score == 0.0
-
-
-def test_build_summary_rejects_non_finite_score(monkeypatch):
-    """LLM 이 'nan'/'inf' 를 줘도 clamp 를 우회하지 못하고 0.0 으로 막힌다."""
-    for bad in ('nan', 'inf', '-inf'):
-        monkeypatch.setattr(
-            llm, 'generate_summary', AsyncMock(return_value={'overall_score': bad})
-        )
-        summary = asyncio.run(service.build_summary(()))
-        assert summary.overall_score == 0.0
 
 
 # ── 무응답 판별·직렬화 ─────────────────────────────────────────────────

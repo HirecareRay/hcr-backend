@@ -20,7 +20,16 @@ from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 from app.core.config import settings
-from app.interview import context, llm, nonverbal, router, service, stt, ws_ticket
+from app.interview import (
+    context,
+    llm,
+    nonverbal,
+    result_service,
+    router,
+    service,
+    stt,
+    ws_ticket,
+)
 from app.main import app
 
 client = TestClient(app)
@@ -94,10 +103,18 @@ def _patch_llm(
     monkeypatch.setattr(
         llm, 'stream_evaluation', _stream_factory(eval_deltas or ['좋은 ', '답변이네요'])
     )
+    # 라이브 summary 는 결과 리포트(generate_report)에서 파생된다 — 리포트를 mock 한다.
     monkeypatch.setattr(
         llm,
-        'generate_summary',
-        AsyncMock(return_value=summary or {'overall_score': 88, 'language_feedback': '논리적', 'improvements': ['결론 강화']}),
+        'generate_report',
+        AsyncMock(
+            return_value=summary
+            or {
+                'overall': {'score': 88, 'grade': 'B+', 'headline': '안정적'},
+                'answer_feedback': {'score': 88, 'summary': '논리적', 'metrics': []},
+                'improvements': [{'area': '결론', 'problem': 'p', 'method': '결론 강화'}],
+            }
+        ),
     )
     monkeypatch.setattr(stt, 'transcribe_audio', AsyncMock(return_value=transcribe))
 
@@ -452,9 +469,9 @@ def test_ws_summary_after_main_questions_exhausted(monkeypatch):
         summary = ws.receive_json()
 
     assert summary['type'] == 'summary'
-    assert summary['overallScore'] == 88.0
-    assert summary['languageFeedback'] == '논리적'
-    assert summary['improvements'] == ['결론 강화']
+    assert summary['overallScore'] == 88.0  # 리포트 overall.score 그대로
+    assert summary['languageFeedback'] == '논리적'  # answer_feedback.summary 파생
+    assert summary['improvements'] == ['결론: 결론 강화']  # area·method 평탄화
 
 
 def test_ws_ignores_control_after_summary(monkeypatch):
@@ -467,13 +484,13 @@ def test_ws_ignores_control_after_summary(monkeypatch):
     _patch_llm(monkeypatch, main_questions=['자기소개 부탁드립니다'])
 
     summary_calls = {'count': 0}
-    real_build_summary = service.build_summary
+    real_summarize = result_service.summarize_and_persist
 
-    async def _counting_build_summary(history, metrics=None):
+    async def _counting_summarize(**kwargs):
         summary_calls['count'] += 1
-        return await real_build_summary(history, metrics)
+        return await real_summarize(**kwargs)
 
-    monkeypatch.setattr(service, 'build_summary', _counting_build_summary)
+    monkeypatch.setattr(result_service, 'summarize_and_persist', _counting_summarize)
 
     with client.websocket_connect(_ws_url()) as ws:
         assert ws.receive_json()['questionId'] == 'm0'
@@ -516,7 +533,11 @@ def test_ws_accumulated_landmarks_reflected_in_summary(monkeypatch):
         monkeypatch,
         main_questions=['자기소개 부탁드립니다'],
         eval_deltas=['ok'],  # transcript + eval 1개 → _drain(2)
-        summary={'overall_score': 90, 'language_feedback': '논리적', 'improvements': []},
+        summary={
+            'overall': {'score': 90, 'grade': 'A', 'headline': 'h'},
+            'answer_feedback': {'score': 90, 'summary': '논리적', 'metrics': []},
+            'improvements': [],
+        },
     )
 
     with client.websocket_connect(_ws_url()) as ws:
@@ -532,8 +553,9 @@ def test_ws_accumulated_landmarks_reflected_in_summary(monkeypatch):
         summary = ws.receive_json()
 
     assert summary['type'] == 'summary'
-    assert '시선' in summary['nonverbalFeedback']  # 누적 landmark 반영
-    assert summary['overallScore'] < 90.0  # 비언어 감점 반영
+    # 누적 landmark 는 종합점수에 섞지 않고 태도 문장으로만 반영한다(표정은 결과 페이지 별도 모달).
+    assert '시선' in summary['nonverbalFeedback']
+    assert summary['overallScore'] == 90.0  # 리포트 점수 그대로(결과 페이지와 일치)
 
 
 def test_ws_summary_sent_even_if_nonverbal_aggregate_raises(monkeypatch):
@@ -544,7 +566,11 @@ def test_ws_summary_sent_even_if_nonverbal_aggregate_raises(monkeypatch):
         monkeypatch,
         main_questions=['자기소개 부탁드립니다'],
         eval_deltas=['ok'],
-        summary={'overall_score': 80, 'language_feedback': '논리적', 'improvements': []},
+        summary={
+            'overall': {'score': 80, 'grade': 'B', 'headline': 'h'},
+            'answer_feedback': {'score': 80, 'summary': '논리적', 'metrics': []},
+            'improvements': [],
+        },
     )
     monkeypatch.setattr(nonverbal, 'aggregate', Mock(side_effect=RuntimeError('boom')))
 
