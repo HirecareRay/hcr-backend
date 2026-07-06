@@ -60,3 +60,27 @@ async def list_fit_history(
     """그 유저의 적합도 분석 기록을 최신순 카드 목록으로 조회한다(적합도 분석 탭)."""
     mongo = get_mongo_db(request)
     return {"success": True, "data": service.list_fit_history(mongo, user_id)}
+
+
+@router.get("/fit/{analysis_id}")
+async def get_fit_analysis(
+    request: Request,
+    analysis_id: str,
+    user_id: str = Depends(_user_id),
+):
+    """analysis_id로 히스토리 단건을 그대로 조회한다(적합도 분석 탭 → 과거 기록 클릭).
+
+    캐시 키 재계산도, LLM 재실행도 없다 — /fit/history 라우트보다 반드시 뒤에 둬야 한다
+    (앞에 두면 '/fit/history' 요청이 analysis_id="history"로 잡혀 히스토리 엔드포인트가 깨진다).
+    """
+    mongo = get_mongo_db(request)
+    try:
+        result = service.get_fit_analysis_by_id(mongo, user_id, analysis_id)
+    except service.FitAnalysisNotFound:
+        raise HTTPException(status_code=404, detail="분석 결과를 찾을 수 없습니다.")
+
+    job_doc = mongo.job_postings.find_one(
+        {"_id": ObjectId(result["job_posting_id"])}, {"source_url": 1}
+    )
+    result["job_url"] = (job_doc or {}).get("source_url") or ""
+    return {"success": True, "data": result}

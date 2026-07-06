@@ -11,6 +11,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.company.models import (
+    CompanyAlias,
     CompanyAnalysis,
     CompanyCrawler,
     JobplanetReview,
@@ -33,12 +34,13 @@ def find_company(mongo: Database, company_id: str) -> dict | None:
         return None
 
 
-def search_companies(mongo: Database, regex: dict, limit: int) -> list[dict]:
-    """company_name·industry 부분일치(정규식) 검색."""
+def search_companies(
+    mongo: Database, name_regexes: list[dict], industry_regex: dict, limit: int
+) -> list[dict]:
+    """company_name(별칭 확장 포함 복수 후보)·industry 부분일치(정규식) 검색."""
+    or_clauses = [{"company_name": rx} for rx in name_regexes] + [{"industry": industry_regex}]
     return list(
-        mongo["companies"]
-        .find({"$or": [{"company_name": regex}, {"industry": regex}]}, _SEARCH_FIELDS)
-        .limit(limit)
+        mongo["companies"].find({"$or": or_clauses}, _SEARCH_FIELDS).limit(limit)
     )
 
 
@@ -64,6 +66,34 @@ def find_dart_employee(mongo: Database, oid) -> dict | None:
 
 
 # ─── MariaDB (ORM) ───────────────────────────────────────────────────
+def find_company_ids_by_alias_match(db: Session, alias_normalized: str, limit: int = 20) -> list[str]:
+    """정규화된 검색어로 company_aliases 부분일치(LIKE '%q%') 조회 — 여러 company_id 반환.
+
+    "씨제이" 같은 축약된 그룹명이 "씨제이제일제당" 등 여러 계열사 별칭의 일부인 경우를
+    잡기 위해 양쪽 와일드카드를 쓴다(별칭 앞에 "주식회사"/"(주)" 등이 남는 경우도 있어 접두
+    일치만으론 놓침). alias_normalized 가 PK지만 이 패턴은 인덱스를 못 타 풀스캔이 된다 —
+    company_aliases 테이블 자체가 작으면 무시할 만한 비용.
+    """
+    rows = db.execute(
+        select(CompanyAlias.company_id)
+        .where(CompanyAlias.alias_normalized.like(f"%{alias_normalized}%"))
+        .distinct()
+        .limit(limit)
+    ).scalars().all()
+    return list(rows)
+
+
+def find_companies_by_id_list(mongo: Database, ids: list[str], limit: int) -> list[dict]:
+    """company_aliases 매치로 얻은 id들 → 검색 결과 포맷용 필드로 조회."""
+    if not ids:
+        return []
+    return list(
+        mongo["companies"]
+        .find({"_id": {"$in": [ObjectId(i) for i in ids]}}, _SEARCH_FIELDS)
+        .limit(limit)
+    )
+
+
 def find_analysis(db: Session, company_id: str) -> CompanyAnalysis | None:
     return db.execute(
         select(CompanyAnalysis).where(CompanyAnalysis.company_id == company_id)
