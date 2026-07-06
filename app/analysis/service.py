@@ -64,6 +64,26 @@ class JobPostingNotFound(Exception):
     pass
 
 
+class FitAnalysisNotFound(Exception):
+    pass
+
+
+_MAX_FIT_ANALYSES_PER_JOB = 2
+
+
+def _prune_old_fit_analyses(mongo: Database, user_id: str, job_posting_id: str, company_id: str) -> None:
+    """같은 (user, job, company)는 최신 _MAX_FIT_ANALYSES_PER_JOB개만 남기고 나머지는 삭제."""
+    stale_ids = [
+        d["_id"]
+        for d in mongo.fit_analyses.find(
+            {"user_id": user_id, "job_posting_id": job_posting_id, "company_id": company_id},
+            {"_id": 1},
+        ).sort("analyzed_at", -1).skip(_MAX_FIT_ANALYSES_PER_JOB)
+    ]
+    if stale_ids:
+        mongo.fit_analyses.delete_many({"_id": {"$in": stale_ids}})
+
+
 def _llm() -> ChatOpenAI:
     return ChatOpenAI(model="gpt-4o-mini", temperature=0, api_key=settings.openai_api_key)
 
@@ -443,6 +463,7 @@ async def analyze_fit(
         )
         if result.upserted_id:
             analysis_id = str(result.upserted_id)
+            _prune_old_fit_analyses(mongo, user_id, job_posting_id, company_id)
         else:
             stored = mongo.fit_analyses.find_one(cache_key)
             stored["analysis_id"] = str(stored.pop("_id"))
@@ -461,6 +482,7 @@ def list_fit_history(mongo: Database, user_id: str) -> list[dict]:
     """그 유저의 적합도 분석 기록을 최신순 카드 목록으로 요약한다(적합도 분석 탭).
 
     fit_analyses 저장 시점의 완성품에서 카드에 필요한 필드만 뽑는다 — LLM 재호출 0.
+    같은 공고는 최신 1건만 목록에 노출한다(이전 것은 DB에는 남아있고 analysis_id로만 조회 가능).
     """
     docs = mongo.fit_analyses.find(
         {"user_id": user_id},
@@ -471,7 +493,13 @@ def list_fit_history(mongo: Database, user_id: str) -> list[dict]:
         },
     ).sort("analyzed_at", -1)
     result = []
+    seen_jobs = set()
     for d in docs:
+        key = (d.get("company_id"), d.get("job_posting_id"))
+        if key in seen_jobs:
+            continue  # 같은 공고의 이전 분석 — 최신 것만 목록에 노출
+        seen_jobs.add(key)
+
         # 저장된 category_summary로 종합 매칭률(%)을 계산 — LLM 재호출도, 별도 조회도 없다.
         summary = d.get("category_summary") or []
         total = sum(s.get("total", 0) for s in summary)
@@ -487,3 +515,16 @@ def list_fit_history(mongo: Database, user_id: str) -> list[dict]:
             "overall_pct": round(matched / total * 100) if total > 0 else None,
         })
     return result
+
+
+def get_fit_analysis_by_id(mongo: Database, user_id: str, analysis_id: str) -> dict:
+    """analysis_id로 히스토리 단건을 그대로 조회한다 — 캐시 키 재계산도, LLM 재실행도 없다."""
+    try:
+        oid = ObjectId(analysis_id)
+    except Exception:
+        raise FitAnalysisNotFound(analysis_id)
+    doc = mongo.fit_analyses.find_one({"_id": oid, "user_id": user_id})
+    if not doc:
+        raise FitAnalysisNotFound(analysis_id)
+    doc["analysis_id"] = str(doc.pop("_id"))
+    return doc
