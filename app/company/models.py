@@ -102,3 +102,17 @@ class SimilarCompany(Base):
     company_id: Mapped[str] = mapped_column(String(24), primary_key=True)
     similar_company_id: Mapped[str] = mapped_column(String(24), primary_key=True)
     similarity_score: Mapped[int | None] = mapped_column(Integer)
+
+
+class CompanyAlias(Base):
+    """검색어 별칭(alias) → company_id 조회 테이블. LLM으로 생성한 표기 변형들의 정확일치 조회용.
+
+    alias_normalized(공백/법인표기 제거 + 소문자)를 PK로 둬서 검색 시 인덱스 조회 1회로
+    끝난다 — Mongo companies.aliases 배열에 넣는 것보다 빠르다(그건 결국 컬렉션 스캔).
+    """
+
+    __tablename__ = "company_aliases"
+
+    alias_normalized: Mapped[str] = mapped_column(String(255), primary_key=True)
+    company_id: Mapped[str] = mapped_column(String(24), index=True)
+    alias_raw: Mapped[str] = mapped_column(String(255))  # 원본 표기(디버깅·표시용, 정규화 전)

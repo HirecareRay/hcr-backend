@@ -7,12 +7,14 @@
 
 import json
 import re
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from pymongo.database import Database
 from sqlalchemy.orm import Session
 
 from app.company import repository
+from app.company.matching import normalize, search_terms
 
 
 class CompanyNotFound(Exception):
@@ -94,12 +96,30 @@ def _dart_employees(mongo: Database, oid) -> dict | None:
 
 
 # ── 검색 ──────────────────────────────────────────────────────────────
-def search_companies(mongo: Database, q: str, limit: int = 20) -> list[dict]:
-    """회사명/업종 부분일치 → FE CompanySearchResult 리스트. q 비면 []."""
+def search_companies(mongo: Database, db: Session, q: str, limit: int = 20) -> list[dict]:
+    """회사명(법인표기/공백 무시 + 별칭)·업종 부분일치 → FE CompanySearchResult 리스트. q 비면 [].
+
+    company_aliases(LLM 생성 별칭, 부분일치) 매치를 맨 앞에 두고, 기존 부분일치 결과를 이어붙인다.
+    """
     q = (q or "").strip()
     if not q:
         return []
-    rx = {"$regex": re.escape(q), "$options": "i"}
+    name_rx = [{"$regex": re.escape(t), "$options": "i"} for t in search_terms(q)]
+    industry_rx = {"$regex": re.escape(q), "$options": "i"}
+
+    # Mongo(회사명·업종)·MariaDB(별칭) 조회는 서로 독립적이라 동시에 보낸다 — 순차 실행 시
+    # 원격 DB(EC2) 왕복 지연이 두 배로 누적되는 걸 막기 위함(왕복당 ~200ms 관측됨).
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        docs_future = ex.submit(repository.search_companies, mongo, name_rx, industry_rx, limit)
+        alias_future = ex.submit(repository.find_company_ids_by_alias_match, db, normalize(q), limit)
+        docs, alias_ids = docs_future.result(), alias_future.result()
+
+    seen_ids = {str(c["_id"]) for c in docs}
+    new_ids = [i for i in alias_ids if i not in seen_ids]
+    if new_ids:
+        alias_docs = repository.find_companies_by_id_list(mongo, new_ids, max(limit - len(docs), 0))
+        docs = [*alias_docs, *docs[: max(limit - len(alias_docs), 0)]]
+
     return [{
         "id": str(c["_id"]), "key": str(c["_id"]),
         "name": _s(c.get("company_name")), "industry": _s(c.get("industry")),
@@ -107,7 +127,7 @@ def search_companies(mongo: Database, q: str, limit: int = 20) -> list[dict]:
         "founded": _s(c.get("founded")), "employeeCount": _s(c.get("employee_count")),
         "category": "미디어",          # ponytail: FE 더미 enum placeholder, 일반화 나중
         "logoText": _logo(c.get("company_name")),
-    } for c in repository.search_companies(mongo, rx, limit)]
+    } for c in docs]
 
 
 def search_company_jobs(mongo: Database, q: str, limit: int = 20) -> list[dict]:
@@ -118,8 +138,9 @@ def search_company_jobs(mongo: Database, q: str, limit: int = 20) -> list[dict]:
     q = (q or "").strip()
     if not q:
         return []
-    rx = {"$regex": re.escape(q), "$options": "i"}
-    companies = repository.search_companies(mongo, rx, limit)
+    name_rx = [{"$regex": re.escape(t), "$options": "i"} for t in search_terms(q)]
+    industry_rx = {"$regex": re.escape(q), "$options": "i"}
+    companies = repository.search_companies(mongo, name_rx, industry_rx, limit)
     ids = [str(c["_id"]) for c in companies]
     jobs = repository.find_jobs_by_company_ids(mongo, ids, limit)
     return [_related_job(j) for j in jobs]

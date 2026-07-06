@@ -9,6 +9,7 @@ from datetime import date
 
 from pymongo.database import Database
 
+from app.company.matching import normalize, search_terms
 from app.jobs import repository
 from app.jobs.job_roles import ROLE_LABELS, classify_job_role, extract_tech_tags
 
@@ -85,18 +86,21 @@ def search_jobs(mongo: Database, q: str, limit: int = 20) -> list[dict]:
     """공고명·회사명·직군명에 검색어가 포함된 진행중 채용공고 — /jobs/search(검색 페이지 탭)용.
 
     직군 탭 고정 분류 없이 전체 진행중 공고를 대상으로 자유 키워드 매칭 후 마감임박순 정렬.
+    회사명 쪽은 법인표기/공백 무시 + 별칭까지 확장(search_terms), 제목/직군명은 정규화만
+    적용해 띄어쓰기 차이를 흡수한다.
     """
-    kw = (q or "").strip().lower()
-    if not kw:
+    terms = search_terms(q)
+    if not terms:
         return []
     docs = repository.find_open_job_postings(mongo, date.today().isoformat())
     items = [_to_job_item(d) for d in docs]
     matched = [
         it
         for it in items
-        if kw in it["title"].lower()
-        or kw in it["company_name"].lower()
-        or kw in it["job_role_label"].lower()
+        if any(
+            t in normalize(it["title"]) or t in normalize(it["company_name"]) or t in normalize(it["job_role_label"])
+            for t in terms
+        )
     ]
     return sorted(matched, key=_sort_key)[:limit]
 
